@@ -58,4 +58,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   systemAuth: (password) => ipcRenderer.invoke('system:auth', password),
   systemCheckAuth: () => ipcRenderer.invoke('system:checkAuth'),
+  systemCleanup: (type) => ipcRenderer.invoke('system:cleanup', type),
+  databaseSetup: (dbName, dbUser, dbPass) => ipcRenderer.invoke('database:setup', dbName, dbUser, dbPass),
 })

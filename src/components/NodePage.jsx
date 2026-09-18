@@ -69,6 +69,9 @@ function NodePage({ theme, lang }) {
   const [cfInstalling, setCfInstalling] = useState(false)
   const [cfLog, setCfLog] = useState('')
   const [cfConfig, setCfConfig] = useState({ tunnelName: 'terver-tunnel', appDomain: '', token: '' })
+  const [dbConfig, setDbConfig] = useState({ name: 'terver_db', user: 'terver', pass: '' })
+  const [dbLog, setDbLog] = useState('')
+  const [cleanupLog, setCleanupLog] = useState('')
 
   const [activeDoc, setActiveDoc] = useState(null)
   const [copiedKey, setCopiedKey] = useState(null)
@@ -764,6 +767,108 @@ function NodePage({ theme, lang }) {
           </div>
         </SectionCard>
 
+        <SectionCard
+          title={lang === 'vi' ? 'Database' : 'Database'}
+          theme={theme}
+          icon={<svg className="w-4 h-4" style={{ color: '#22c55e' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>}
+        >
+          <div className="space-y-3">
+            <p className="text-[11px]" style={{ color: labelColor }}>
+              {lang === 'vi' ? 'Tự động cấu hình PostgreSQL database cho game server.' : 'Auto-configure PostgreSQL database for game servers.'}
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                value={dbConfig.name}
+                onChange={(e) => setDbConfig({ ...dbConfig, name: e.target.value })}
+                placeholder={lang === 'vi' ? 'Tên DB' : 'DB Name'}
+                className="px-3 py-2 rounded-lg text-xs outline-none"
+                style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
+              />
+              <input
+                value={dbConfig.user}
+                onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })}
+                placeholder={lang === 'vi' ? 'User' : 'User'}
+                className="px-3 py-2 rounded-lg text-xs outline-none"
+                style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
+              />
+              <input
+                value={dbConfig.pass}
+                onChange={(e) => setDbConfig({ ...dbConfig, pass: e.target.value })}
+                type="password"
+                placeholder={lang === 'vi' ? 'Password' : 'Password'}
+                className="px-3 py-2 rounded-lg text-xs outline-none"
+                style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
+              />
+            </div>
+            <button
+              onClick={async () => {
+                if (!isElectron) return
+                const res = await window.electronAPI.databaseSetup(dbConfig.name, dbConfig.user, dbConfig.pass)
+                if (res?.ok) {
+                  setDbLog((lang === 'vi' ? '[OK] Database đã sẵn sàng!\n' : '[OK] Database ready!\n') + (res.message || ''))
+                } else {
+                  setDbLog((lang === 'vi' ? '[LỖI] ' : '[ERROR] ') + (res?.error || ''))
+                }
+              }}
+              className="px-5 py-2 rounded-xl text-xs font-semibold transition-all"
+              style={{ background: '#22c55e', color: '#fff' }}
+            >
+              {lang === 'vi' ? 'Tạo Database' : 'Create Database'}
+            </button>
+            <div className="relative">
+              <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                {dbLog || (lang === 'vi' ? 'Nhập tên DB, user, password → nhấn "Tạo Database".' : 'Enter DB name, user, password → click "Create Database".')}
+              </pre>
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard
+          title={lang === 'vi' ? 'Xóa dữ liệu' : 'Cleanup Data'}
+          theme={theme}
+          icon={<svg className="w-4 h-4" style={{ color: '#ef4444' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>}
+        >
+          <div className="space-y-3">
+            <p className="text-[11px]" style={{ color: labelColor }}>
+              {lang === 'vi' ? 'Xóa toàn bộ cấu hình và dữ liệu theo từng loại.' : 'Delete all configuration and data by type.'}
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: 'docker', label: 'Docker', color: '#2496ed' },
+                { key: 'wings', label: 'LunarSpace Wings', color: '#06b6d4' },
+                { key: 'cloudflare', label: 'Cloudflare', color: '#3b82f6' },
+                { key: 'database', label: 'Database', color: '#22c55e' },
+                { key: 'logs', label: 'Logs', color: '#f59e0b' },
+                { key: 'all', label: lang === 'vi' ? 'Tất cả' : 'All', color: '#ef4444' },
+              ].map(item => (
+                <button
+                  key={item.key}
+                  onClick={async () => {
+                    if (!isElectron) return
+                    setCleanupLog((lang === 'vi' ? `[INFO] Đang xóa ${item.label}...\n` : `[INFO] Cleaning ${item.label}...\n`))
+                    const res = await window.electronAPI.systemCleanup(item.key)
+                    if (res?.ok) {
+                      setCleanupLog(prev => prev + (lang === 'vi' ? `[OK] Đã xóa ${item.label}!\n` : `[OK] ${item.label} cleaned!\n`) + (res.results?.join('\n') || ''))
+                      refreshAll()
+                    } else {
+                      setCleanupLog(prev => prev + (lang === 'vi' ? '[LỖI] ' : '[ERROR] ') + (res?.error || ''))
+                    }
+                  }}
+                  className="py-2 rounded-xl text-[11px] font-semibold transition-all"
+                  style={{ background: `${item.color}20`, border: `1px solid ${item.color}40`, color: item.color }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <div className="relative">
+              <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                {cleanupLog || (lang === 'vi' ? 'Chọn loại dữ liệu để xóa.' : 'Select data type to clean.')}
+              </pre>
+            </div>
+          </div>
+        </SectionCard>
+
       </div>
 
       {activeDoc && (
@@ -810,7 +915,7 @@ function NodePage({ theme, lang }) {
                     </div>
                     <div className="pt-2" style={{ borderTop: `1px solid ${theme === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'}` }}>
                       <h4 className="font-semibold mb-1" style={{ color: textColor }}>{lang === 'vi' ? 'Tài liệu tham khảo' : 'References'}</h4>
-                      <a href="https://github.com/calagopus/wings" target="_blank" rel="noreferrer" onClick={(e) => { e.preventDefault(); handleDocsClick('https://github.com/calagopus/wings') }} className="text-xs underline" style={{ color: '#06b6d4' }}>github.com/calagopus/wings</a>
+                      <a href="https://github.com/foxstudio-201/LunarSpaceWingLunar" target="_blank" rel="noreferrer" onClick={(e) => { e.preventDefault(); handleDocsClick('https://github.com/foxstudio-201/LunarSpaceWingLunar') }} className="text-xs underline" style={{ color: '#06b6d4' }}>github.com/foxstudio-201/LunarSpaceWingLunar</a>
                     </div>
                   </div>
                 ) : (

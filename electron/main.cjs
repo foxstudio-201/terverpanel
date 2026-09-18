@@ -820,7 +820,7 @@ ipcMain.handle('wings:status', async (e) => {
     let arch = 'x86_64'
     try { arch = archMap[execSync('uname -m', { encoding: 'utf8' }).trim()] || 'x86_64' } catch {}
     const binaryPath = '/usr/local/bin/wings'
-    const configPath = '/etc/calagopus-wings/config.yml'
+    const configPath = '/etc/lunarspace-wings/config.yml'
     let installed = false
     try { fs2.accessSync(binaryPath, fs2.constants.F_OK | fs2.constants.X_OK); installed = true } catch {}
     let running = false, version = ''
@@ -833,15 +833,15 @@ ipcMain.handle('wings:status', async (e) => {
     }
     let hasConfig = false
     try { hasConfig = fs2.existsSync(configPath) } catch {}
-    const serviceFile = '/etc/systemd/system/wings.service'
+    const serviceFile = '/etc/systemd/system/lunarspace-wings.service'
     let hasService = false
     try { hasService = fs2.existsSync(serviceFile) } catch {}
     if (!hasService) {
-      try { hasService = fs2.existsSync('/etc/init.d/wings') } catch {}
+      try { hasService = fs2.existsSync('/etc/init.d/lunarspace-wings') } catch {}
     }
     if (hasService) {
       try {
-        const status = execSync('systemctl is-active wings 2>/dev/null || rc-service wings status 2>/dev/null', { timeout: 5000, encoding: 'utf8' }).trim()
+        const status = execSync('systemctl is-active lunarspace-wings 2>/dev/null || rc-service lunarspace-wings status 2>/dev/null', { timeout: 5000, encoding: 'utf8' }).trim()
         running = status === 'active' || status === 'started'
       } catch {}
     }
@@ -861,16 +861,16 @@ ipcMain.handle('wings:install', async (e) => {
     let arch = 'x86_64'
     try { arch = archMap[execSync('uname -m', { encoding: 'utf8' }).trim()] || 'x86_64' } catch {}
     const binaryPath = '/usr/local/bin/wings'
-    const configDir = '/etc/calagopus-wings'
+    const configDir = '/etc/lunarspace-wings'
     const configPath = `${configDir}/config.yml`
 
   return new Promise(async (resolve) => {
     try {
-      const tagRes = await fetch('https://api.github.com/repos/calagopus/wings/releases/latest')
+      const tagRes = await fetch('https://api.github.com/repos/foxstudio-201/LunarSpaceWingLunar/releases/latest')
       const tagData = await tagRes.json()
       const tagName = tagData.tag_name
       const assetName = `wings-rs-${arch}-linux`
-      const downloadUrl = `https://github.com/calagopus/wings/releases/download/${tagName}/${assetName}`
+      const downloadUrl = `https://github.com/foxstudio-201/LunarSpaceWingLunar/releases/download/${tagName}/${assetName}`
 
       const tmpDir = '/tmp/terver-wings-install'
       if (!fs2.existsSync(tmpDir)) fs2.mkdirSync(tmpDir, { recursive: true })
@@ -934,7 +934,7 @@ PartOf=docker.service
 User=root
 KillMode=process
 LimitNOFILE=4096
-PIDFile=/run/calagopus-wings/daemon.pid
+PIDFile=/run/lunarspace-wings/daemon.pid
 ExecStart=${binaryPath}
 Restart=on-failure
 StartLimitInterval=180
@@ -944,14 +944,14 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 `
-        sudoExec(`cat > /etc/systemd/system/wings.service << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
+        sudoExec(`cat > /etc/systemd/system/lunarspace-wings.service << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
         sudoExec('systemctl daemon-reload')
       } else {
         serviceContent = `#!/sbin/openrc-run
 description="LunarSpace Wings Daemon"
 command="${binaryPath}"
 supervisor="supervise-daemon"
-pidfile="/run/calagopus-wings.pid"
+pidfile="/run/lunarspace-wings.pid"
 rc_ulimit="-n 4096"
 respawn_delay=5
 respawn_max=30
@@ -960,8 +960,8 @@ depend() {
     need net docker
 }
 `
-        sudoExec(`cat > /etc/init.d/wings << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
-        sudoExec('chmod +x /etc/init.d/wings')
+        sudoExec(`cat > /etc/init.d/lunarspace-wings << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
+        sudoExec('chmod +x /etc/init.d/lunarspace-wings')
       }
 
       resolve({ ok: true, version: versionMatch ? versionMatch[1] : 'unknown', arch, initSystem })
@@ -979,9 +979,9 @@ ipcMain.handle('wings:start', async (e) => {
   const fs2 = require('fs')
   try {
     if (fs2.existsSync('/run/systemd/system')) {
-      sudoExec('systemctl start wings')
+      sudoExec('systemctl start lunarspace-wings')
     } else {
-      sudoExec('rc-service wings start')
+      sudoExec('rc-service lunarspace-wings start')
     }
     return { ok: true }
   } catch (err) {
@@ -994,9 +994,9 @@ ipcMain.handle('wings:stop', async (e) => {
   const fs2 = require('fs')
   try {
     if (fs2.existsSync('/run/systemd/system')) {
-      sudoExec('systemctl stop wings')
+      sudoExec('systemctl stop lunarspace-wings')
     } else {
-      sudoExec('rc-service wings stop')
+      sudoExec('rc-service lunarspace-wings stop')
     }
     return { ok: true }
   } catch (err) {
@@ -1008,7 +1008,7 @@ ipcMain.handle('wings:config:generate', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   const fs2 = require('fs')
   const yaml = require('js-yaml')
-  const configDir = '/etc/calagopus-wings'
+  const configDir = '/etc/lunarspace-wings'
   const configPath = `${configDir}/config.yml`
   try {
     const mkdirResult = sudoExec(`mkdir -p ${configDir}`)
@@ -1018,13 +1018,13 @@ ipcMain.handle('wings:config:generate', async (e) => {
       token: require('crypto').randomBytes(16).toString('hex'),
       api: { host: '0.0.0.0', port: 8080, ssl: { enabled: false } },
       system: {
-        data: '/var/lib/calagopus-wings/servers',
-        log_dir: '/var/log/calagopus-wings',
-        tmp_dir: '/tmp/calagopus-wings',
-        backup: { storage: '/var/lib/calagopus-wings/backups' },
+        data: '/var/lib/lunarspace-wings/servers',
+        log_dir: '/var/log/lunarspace-wings',
+        tmp_dir: '/tmp/lunarspace-wings',
+        backup: { storage: '/var/lib/lunarspace-wings/backups' },
       },
-      allowed_mounts: ['/home', '/var/lib/calagopus-wings/servers'],
-      docker: { network: { interface: 'wings0', name: 'calagopus-net', subnet: '172.18.0.0/16' } },
+      allowed_mounts: ['/home', '/var/lib/lunarspace-wings/servers'],
+      docker: { network: { interface: 'wings0', name: 'lunarspace-net', subnet: '172.18.0.0/16' } },
     }
     sudoExec(`cat > ${configPath} << 'YAMLEOF'\n${yaml.dump(config)}\nYAMLEOF`)
     sudoExec(`chmod 600 ${configPath}`)
@@ -1167,6 +1167,54 @@ ipcMain.handle('cloudflare:tunnel:check-auth', async (e) => {
     return { ok: true, authenticated: exists }
   } catch {
     return { ok: true, authenticated: false }
+  }
+})
+
+ipcMain.handle('system:cleanup', async (e, type) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const fs2 = require('fs')
+  const results = []
+  try {
+    if (type === 'docker' || type === 'all') {
+      sudoExec('docker system prune -af 2>/dev/null || true')
+      results.push('Docker: cleaned')
+    }
+    if (type === 'wings' || type === 'all') {
+      const paths = ['/etc/lunarspace-wings', '/var/lib/lunarspace-wings', '/var/log/lunarspace-wings', '/tmp/lunarspace-wings', '/etc/systemd/system/lunarspace-wings.service', '/etc/init.d/lunarspace-wings']
+      paths.forEach(p => sudoExec(`rm -rf ${p}`))
+      results.push('Wings: cleaned')
+    }
+    if (type === 'cloudflare' || type === 'all') {
+      sudoExec('rm -rf /root/.cloudflared')
+      results.push('Cloudflare: cleaned')
+    }
+    if (type === 'database' || type === 'all') {
+      sudoExec('rm -rf /var/lib/postgresql/data/*')
+      results.push('Database: cleaned')
+    }
+    if (type === 'logs' || type === 'all') {
+      sudoExec('journalctl --rotate && journalctl --vacuum-time=1s 2>/dev/null || true')
+      results.push('Logs: cleaned')
+    }
+    return { ok: true, results }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('database:setup', async (e, dbName, dbUser, dbPass) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const isRunning = sudoExec('systemctl is-active postgresql').output?.includes('active')
+    if (!isRunning) {
+      sudoExec('systemctl enable --now postgresql')
+    }
+    sudoExec(`su - postgres -c "psql -c \\"CREATE USER ${dbUser} WITH PASSWORD '${dbPass}'\\" 2>/dev/null || true"`)
+    sudoExec(`su - postgres -c "psql -c \\"CREATE DATABASE ${dbName} OWNER ${dbUser}\\" 2>/dev/null || true"`)
+    sudoExec(`su - postgres -c "psql -c \\"GRANT ALL PRIVILEGES ON DATABASE ${dbName} TO ${dbUser}\\""`)
+    return { ok: true, message: `Database ${dbName} ready` }
+  } catch (err) {
+    return { ok: false, error: err.message }
   }
 })
 
