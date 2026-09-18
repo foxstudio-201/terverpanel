@@ -1172,28 +1172,40 @@ ipcMain.handle('cloudflare:tunnel:check-auth', async (e) => {
 
 ipcMain.handle('system:cleanup', async (e, type) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const fs2 = require('fs')
   const results = []
   try {
     if (type === 'docker' || type === 'all') {
-      sudoExec('docker system prune -af 2>/dev/null || true')
-      results.push('Docker: cleaned')
+      sudoExec('systemctl stop docker docker.socket 2>/dev/null || true')
+      sudoExec('systemctl disable docker docker.socket 2>/dev/null || true')
+      sudoExec('rm -rf /var/lib/docker /var/run/docker.sock /etc/docker /usr/local/bin/docker* /usr/local/bin/containerd* /usr/local/bin/ctr* /usr/local/bin/crictl* /usr/local/bin/runc 2>/dev/null || true')
+      sudoExec('apt purge -y docker docker.io containerd runc 2>/dev/null || dnf remove -y docker docker-ce 2>/dev/null || pacman -Rns --noconfirm docker 2>/dev/null || true')
+      results.push('Docker: uninstalled')
     }
     if (type === 'wings' || type === 'all') {
-      const paths = ['/etc/lunarspace-wings', '/var/lib/lunarspace-wings', '/var/log/lunarspace-wings', '/tmp/lunarspace-wings', '/etc/systemd/system/lunarspace-wings.service', '/etc/init.d/lunarspace-wings']
-      paths.forEach(p => sudoExec(`rm -rf ${p}`))
-      results.push('Wings: cleaned')
+      sudoExec('systemctl stop lunarspace-wings 2>/dev/null || rc-service lunarspace-wings stop 2>/dev/null || true')
+      sudoExec('systemctl disable lunarspace-wings 2>/dev/null || true')
+      sudoExec('rm -rf /usr/local/bin/wings /etc/lunarspace-wings /var/lib/lunarspace-wings /var/log/lunarspace-wings /tmp/lunarspace-wings /etc/systemd/system/lunarspace-wings.service /etc/init.d/lunarspace-wings /run/lunarspace-wings 2>/dev/null || true')
+      sudoExec('systemctl daemon-reload 2>/dev/null || true')
+      results.push('Wings: uninstalled')
     }
     if (type === 'cloudflare' || type === 'all') {
-      sudoExec('rm -rf /root/.cloudflared')
-      results.push('Cloudflare: cleaned')
+      sudoExec('systemctl stop cloudflared 2>/dev/null || true')
+      sudoExec('systemctl disable cloudflared 2>/dev/null || true')
+      sudoExec('rm -rf /usr/local/bin/cloudflared /root/.cloudflared /etc/systemd/system/cloudflared.service 2>/dev/null || true')
+      sudoExec('systemctl daemon-reload 2>/dev/null || true')
+      results.push('Cloudflare: uninstalled')
     }
     if (type === 'database' || type === 'all') {
-      sudoExec('rm -rf /var/lib/postgresql/data/*')
-      results.push('Database: cleaned')
+      sudoExec('systemctl stop postgresql 2>/dev/null || true')
+      sudoExec('systemctl disable postgresql 2>/dev/null || true')
+      sudoExec('apt purge -y postgresql postgresql-* 2>/dev/null || dnf remove -y postgresql-server 2>/dev/null || pacman -Rns --noconfirm postgresql 2>/dev/null || true')
+      sudoExec('rm -rf /var/lib/postgresql /etc/postgresql /var/log/postgresql 2>/dev/null || true')
+      results.push('Database: uninstalled')
     }
     if (type === 'logs' || type === 'all') {
-      sudoExec('journalctl --rotate && journalctl --vacuum-time=1s 2>/dev/null || true')
+      sudoExec('journalctl --rotate 2>/dev/null || true')
+      sudoExec('journalctl --vacuum-time=1s 2>/dev/null || true')
+      sudoExec('rm -rf /var/log/*.log /var/log/*.gz 2>/dev/null || true')
       results.push('Logs: cleaned')
     }
     return { ok: true, results }
