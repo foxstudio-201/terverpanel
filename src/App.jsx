@@ -38,6 +38,7 @@ function AppContent() {
   const [savedCredentials, setSavedCredentials] = useState({ savedUsername: '', savedPassword: '', rememberMe: false })
   const [sidebarServers, setSidebarServers] = useState([])
   const [showServerDropdown, setShowServerDropdown] = useState(false)
+  const [selectedSidebarServer, setSelectedSidebarServer] = useState(null)
 
   const startupDone = useRef(false)
 
@@ -194,20 +195,33 @@ function AppContent() {
       <div className="flex flex-1 overflow-hidden relative pt-11">
         <nav className="absolute left-0 top-11 bottom-0 z-50 w-[180px] flex flex-col py-3" style={{ background: theme === 'light' ? '#fafafa' : '#0d0d0d', borderRight: `1px solid ${borderColor}` }}>
           <div className="flex flex-col gap-1 px-2 py-1 flex-1">
-            {/* Server List dropdown trigger */}
+            {/* Server dropdown */}
             {sidebarServers.length > 0 && (
               <div className="relative">
                 <button
                   onClick={() => setShowServerDropdown(!showServerDropdown)}
-                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left overflow-hidden"
                   style={{
                     background: showServerDropdown ? 'rgba(167,139,250,0.12)' : 'transparent',
-                    color: showServerDropdown ? '#a78bfa' : labelColor,
+                    color: showServerDropdown ? '#a78bfa' : textColor,
                   }}
                 >
-                  <List size={18} weight="duotone" />
-                  <span className="text-xs font-medium truncate">{lang === 'vi' ? 'Danh sách server' : 'Servers'}</span>
-                  <svg className={`w-3 h-3 ml-auto shrink-0 transition-transform ${showServerDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                  {selectedSidebarServer ? (
+                    <>
+                      <img
+                        src={selectedSidebarServer.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
+                        alt=""
+                        className="w-5 h-5 rounded object-contain shrink-0"
+                      />
+                      <span className="text-xs font-semibold truncate flex-1">{selectedSidebarServer.name}</span>
+                    </>
+                  ) : (
+                    <>
+                      <List size={18} weight="duotone" style={{ color: labelColor }} />
+                      <span className="text-xs font-medium" style={{ color: labelColor }}>{lang === 'vi' ? 'Chọn server' : 'Select server'}</span>
+                    </>
+                  )}
+                  <svg className={`w-3 h-3 ml-auto shrink-0 transition-transform ${showServerDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} style={{ color: labelColor }}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
                 </button>
                 {showServerDropdown && (
                   <>
@@ -218,7 +232,7 @@ function AppContent() {
                     >
                       <div className="px-3 py-2.5" style={{ borderBottom: `1px solid ${borderColor}` }}>
                         <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: labelColor }}>
-                          {lang === 'vi' ? 'Danh sách server' : 'Server List'}
+                          {lang === 'vi' ? 'Chọn server' : 'Select server'}
                         </p>
                       </div>
                       <div className="max-h-72 overflow-auto py-1">
@@ -229,11 +243,13 @@ function AppContent() {
                         ) : (
                           sidebarServers.map((srv, i) => {
                             const statusColor = srv.status === 'running' ? '#22c55e' : srv.status === 'installing' ? '#eab308' : '#ef4444'
+                            const isSelected = selectedSidebarServer?.id === srv.id
                             return (
                               <button
                                 key={srv.id || i}
-                                onClick={() => { setShowServerDropdown(false); navigateTo('servers') }}
-                                className="w-full px-3 py-2.5 flex items-center gap-2.5 transition-colors hover:bg-white/5"
+                                onClick={() => { setSelectedSidebarServer(srv); setShowServerDropdown(false); navigateTo('servers') }}
+                                className="w-full px-3 py-2.5 flex items-center gap-2.5 transition-colors"
+                                style={{ background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}
                               >
                                 <img
                                   src={srv.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}

@@ -596,69 +596,129 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
 }
 
 function ServerCard({ server, theme, lang, onStart, onStop, onRestart }) {
-  const cardBg = theme === 'light' ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.03)'
-  const cardBorder = theme === 'light' ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'
-  const textColor = theme === 'light' ? '#111' : '#fff'
-  const labelColor = theme === 'light' ? '#555' : 'rgba(255,255,255,0.6)'
-  const inputBg = theme === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)'
+  const textColor = '#fff'
+  const labelColor = 'rgba(255,255,255,0.6)'
+  const inputBg = 'rgba(255,255,255,0.1)'
+  const dividerColor = 'rgba(255,255,255,0.12)'
+  const [menuOpen, setMenuOpen] = useState(false)
 
-  const gameTint = server.game === 'minecraft'
-    ? 'rgba(34,197,94,0.04)'
-    : 'rgba(59,130,246,0.04)'
+  const bgImage = server.game === 'minecraft' ? './Minecraft_backgound.png' : './terraria_backgound.png'
+  const gameIcon = server.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'
   const statusColor = server.status === 'running' ? '#22c55e' : server.status === 'installing' ? '#eab308' : '#ef4444'
+  const serverIp = '127.0.0.1'
+  const serverPort = '25565'
+
+  const RamIcon = () => (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 3v18M18 3v18M6 9h12M6 15h12M3 6h3M3 12h3M3 18h3M18 6h3M18 12h3M18 18h3" /></svg>
+  )
+  const CpuIcon = () => (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5M4.5 15.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>
+  )
+  const DiskIcon = () => (
+    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>
+  )
 
   return (
     <div
-      className="rounded-2xl overflow-hidden transition-all hover:scale-[1.01]"
-      style={{ background: gameTint, border: `1px solid ${cardBorder}` }}
+      className="rounded-2xl overflow-hidden relative transition-all hover:scale-[1.01]"
+      style={{ border: `1px solid ${dividerColor}` }}
     >
-      <div className="p-4 flex flex-col gap-3">
+      <img src={bgImage} alt="" className="absolute inset-0 w-full h-full object-cover" />
+      <div className="absolute inset-0" style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.7) 40%, rgba(0,0,0,0.4) 100%)' }} />
+
+      <div className="relative z-10 p-4 flex flex-col gap-3">
+        {/* Top row: icon + name + status | menu button */}
         <div className="flex items-center gap-3">
-          <img
-            src={server.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
-            alt=""
-            className="w-10 h-10 rounded-xl object-contain shrink-0"
-          />
+          <img src={gameIcon} alt="" className="w-10 h-10 rounded-xl object-contain shrink-0" />
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <p className="text-sm font-semibold truncate server-name-marquee" style={{ color: textColor }}>{server.name}</p>
-              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor }} />
-            </div>
+            <p className="text-sm font-bold truncate" style={{ color: textColor }}>{server.name}</p>
             <p className="text-[11px] truncate" style={{ color: labelColor }}>{server.egg}</p>
+          </div>
+          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: statusColor }} />
+          {/* Menu button */}
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
+              style={{ background: menuOpen ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)', color: textColor }}
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
+            </button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                <div
+                  className="absolute right-0 top-full z-50 w-40 rounded-xl overflow-hidden shadow-2xl mt-1"
+                  style={{ background: 'rgba(20,20,20,0.98)', border: `1px solid ${dividerColor}`, backdropFilter: 'blur(20px)' }}
+                >
+                  {server.status !== 'running' ? (
+                    <button
+                      onClick={() => { onStart(server); setMenuOpen(false) }}
+                      className="w-full px-3 py-2.5 flex items-center gap-2 text-[11px] font-semibold transition-colors hover:bg-white/10"
+                      style={{ color: '#22c55e' }}
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                      {lang === 'vi' ? 'Khởi động' : 'Start'}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => { onStop(server); setMenuOpen(false) }}
+                        className="w-full px-3 py-2.5 flex items-center gap-2 text-[11px] font-semibold transition-colors hover:bg-white/10"
+                        style={{ color: '#ef4444' }}
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
+                        {lang === 'vi' ? 'Dừng' : 'Stop'}
+                      </button>
+                      <button
+                        onClick={() => { onRestart(server); setMenuOpen(false) }}
+                        className="w-full px-3 py-2.5 flex items-center gap-2 text-[11px] font-semibold transition-colors hover:bg-white/10"
+                        style={{ color: '#eab308' }}
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg>
+                        {lang === 'vi' ? 'Khởi động lại' : 'Restart'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-[10px]" style={{ color: labelColor }}>
-          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.memory || 0}MB</span>
-          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.cpuPercent || 0}%</span>
-          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.disk || 0}MB</span>
+        {/* IP + Port badge */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] px-2 py-0.5 rounded-md font-mono" style={{ background: 'rgba(255,255,255,0.1)', border: `1px solid ${dividerColor}`, color: 'rgba(255,255,255,0.7)' }}>
+            {serverIp}:{serverPort}
+          </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          {server.status === 'running' ? (
-            <button
-              onClick={() => onStop(server)}
-              className="flex-1 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
-              style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
-            >
-              {lang === 'vi' ? 'Dừng' : 'Stop'}
-            </button>
-          ) : (
-            <button
-              onClick={() => onStart(server)}
-              className="flex-1 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
-              style={{ background: 'rgba(34,197,94,0.15)', color: '#22c55e' }}
-            >
-              {lang === 'vi' ? 'Khởi động' : 'Start'}
-            </button>
-          )}
-          <button
-            onClick={() => onRestart(server)}
-            className="px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
-            style={{ background: inputBg, color: labelColor }}
-          >
-            {lang === 'vi' ? 'Khởi động lại' : 'Restart'}
-          </button>
+        {/* Divider */}
+        <div className="w-full h-px" style={{ background: dividerColor }} />
+
+        {/* RAM, CPU, Disk */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1.5">
+            <div style={{ color: '#a78bfa' }}><RamIcon /></div>
+            <div>
+              <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>RAM</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.memory || 0}MB</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div style={{ color: '#3b82f6' }}><CpuIcon /></div>
+            <div>
+              <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>CPU</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.cpuPercent || 0}%</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div style={{ color: '#22c55e' }}><DiskIcon /></div>
+            <div>
+              <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>Disk</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.disk || 0}MB</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
