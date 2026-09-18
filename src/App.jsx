@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AppProvider, useApp } from './i18n/AppContext'
 import { t } from './i18n/translations'
-import { House, Gear, Heart, Cube } from '@phosphor-icons/react'
+import { House, Gear, Heart, Cube, List } from '@phosphor-icons/react'
 import TitleBar from './components/TitleBar'
 import CloseModal from './components/CloseModal'
 import TooltipProvider from './components/ui/TooltipProvider'
@@ -36,6 +36,8 @@ function AppContent() {
   const [displaySession, setDisplaySession] = useState(null)
   const [displayPage, setDisplayPage] = useState('servers')
   const [savedCredentials, setSavedCredentials] = useState({ savedUsername: '', savedPassword: '', rememberMe: false })
+  const [sidebarServers, setSidebarServers] = useState([])
+  const [showServerDropdown, setShowServerDropdown] = useState(false)
 
   const startupDone = useRef(false)
 
@@ -71,6 +73,9 @@ function AppContent() {
         startupDone.current = true
         setPhase('idle')
       }
+      window.electronAPI.getServerConfigs().then((res) => {
+        if (res?.ok) setSidebarServers(res.configs || [])
+      }).catch(() => {})
     }
     checkSession()
   }, [])
@@ -182,6 +187,59 @@ function AppContent() {
       <div className="flex flex-1 overflow-hidden relative pt-11">
         <nav className="absolute left-0 top-11 bottom-0 z-50 w-[72px] flex flex-col items-center py-3 overflow-hidden">
           <div className="flex flex-col items-center gap-1.5 px-2 py-2">
+            <div className="relative">
+              <button
+                onClick={() => setShowServerDropdown(!showServerDropdown)}
+                data-tip={lang === 'vi' ? 'Danh sách server' : 'Server List'}
+                className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
+              >
+                <List size={28} weight="duotone" className={`transition-all duration-200 ${showServerDropdown ? 'w-11 h-11' : 'w-9 h-9'}`} />
+              </button>
+              {showServerDropdown && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowServerDropdown(false)} />
+                  <div
+                    className="absolute left-[60px] top-0 z-50 w-64 rounded-xl overflow-hidden shadow-2xl"
+                    style={{ background: theme === 'light' ? '#fff' : '#1a1a1a', border: `1px solid ${borderColor}` }}
+                  >
+                    <div className="px-3 py-2" style={{ borderBottom: `1px solid ${borderColor}` }}>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: labelColor }}>
+                        {lang === 'vi' ? 'Danh sách server' : 'Server List'}
+                      </p>
+                    </div>
+                    <div className="max-h-64 overflow-auto py-1">
+                      {sidebarServers.length === 0 ? (
+                        <p className="text-[11px] px-3 py-4 text-center" style={{ color: labelColor }}>
+                          {lang === 'vi' ? 'Chưa có server' : 'No servers'}
+                        </p>
+                      ) : (
+                        sidebarServers.map((srv, i) => {
+                          const statusColor = srv.status === 'running' ? '#22c55e' : srv.status === 'installing' ? '#eab308' : '#ef4444'
+                          return (
+                            <button
+                              key={srv.id || i}
+                              onClick={() => { setShowServerDropdown(false); navigateTo('servers') }}
+                              className="w-full px-3 py-2 flex items-center gap-2.5 transition-colors hover:bg-white/5"
+                            >
+                              <img
+                                src={srv.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
+                                alt=""
+                                className="w-7 h-7 rounded-lg object-contain shrink-0"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-semibold truncate server-name-marquee" style={{ color: textColor }}>{srv.name}</p>
+                                <p className="text-[10px] truncate" style={{ color: labelColor }}>{srv.egg}</p>
+                              </div>
+                              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor }} />
+                            </button>
+                          )
+                        })
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
             <button
               onClick={() => navigateTo('servers')}
               data-tip={t(lang, 'sidebar.home')}

@@ -123,3 +123,12 @@
 ::-webkit-scrollbar-corner {
   background: transparent !important;
 }
+
+@keyframes marquee {
+  0%, 20% { transform: translateX(0); }
+  80%, 100% { transform: translateX(-100%); }
+}
+
+.server-name-marquee:hover {
+  animation: marquee 4s ease-in-out infinite;
+}

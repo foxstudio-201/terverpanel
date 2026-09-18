@@ -205,9 +205,37 @@ function GameModal({ game, theme, lang, onClose }) {
     setSelectedEgg(null); setEggData(null); setEggConfigVars({}); setStep('egg'); setServerName(''); setSelectedDockerImage(''); setSelectedVersion(null); setSelectedBuild(null); setResources(null)
   }
 
-  const handleCreate = () => {
-    const configStr = Object.entries(eggConfigVars).map(([k, v]) => `${k}=${v}`).join('\n')
-    alert(`Server "${serverName}"\nEgg: ${eggData?.name}\nVersion: ${selectedVersion}\nBuild: ${selectedBuild?.buildName || 'N/A'}\nImage: ${selectedDockerImage}\nRAM: ${resources.memory}MB | CPU: ${resources.cpuCoresUsed}/${resources.cpuCores} cores (${resources.cpuPercent}%) | Disk: ${resources.disk}MB\n\nConfig:\n${configStr}\n\nTính năng Docker sẽ được hoàn thiện sau.`)
+  const [creating, setCreating] = useState(false)
+
+  const handleCreate = async () => {
+    if (creating) return
+    setCreating(true)
+    const serverData = {
+      name: serverName || `${game.name}-server`,
+      game: game.id,
+      egg: eggData?.name || '',
+      eggId: selectedEgg,
+      version: selectedVersion,
+      build: selectedBuild?.buildName || null,
+      dockerImage: selectedDockerImage,
+      resources: {
+        memory: resources.memory,
+        cpuPercent: resources.cpuPercent,
+        cpuCores: resources.cpuCoresUsed,
+        disk: resources.disk,
+      },
+      config: eggConfigVars,
+      status: 'stopped',
+    }
+    if (isElectron) {
+      try {
+        await window.electronAPI.addServerConfig(serverData)
+        handleClose()
+      } catch (err) {
+        console.error('Failed to save server config:', err)
+      }
+    }
+    setCreating(false)
   }
 
   const Section = ({ title, children }) => (
@@ -566,11 +594,83 @@ function GameModal({ game, theme, lang, onClose }) {
   )
 }
 
+function ServerCard({ server, theme, lang, onStart, onStop, onRestart }) {
+  const cardBg = theme === 'light' ? 'rgba(0,0,0,0.03)' : 'rgba(255,255,255,0.03)'
+  const cardBorder = theme === 'light' ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'
+  const textColor = theme === 'light' ? '#111' : '#fff'
+  const labelColor = theme === 'light' ? '#555' : 'rgba(255,255,255,0.6)'
+  const inputBg = theme === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)'
+
+  const gameTint = server.game === 'minecraft'
+    ? 'rgba(34,197,94,0.04)'
+    : 'rgba(59,130,246,0.04)'
+  const statusColor = server.status === 'running' ? '#22c55e' : server.status === 'installing' ? '#eab308' : '#ef4444'
+
+  return (
+    <div
+      className="rounded-2xl overflow-hidden transition-all hover:scale-[1.01]"
+      style={{ background: gameTint, border: `1px solid ${cardBorder}` }}
+    >
+      <div className="p-4 flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <img
+            src={server.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
+            alt=""
+            className="w-10 h-10 rounded-xl object-contain shrink-0"
+          />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-semibold truncate server-name-marquee" style={{ color: textColor }}>{server.name}</p>
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor }} />
+            </div>
+            <p className="text-[11px] truncate" style={{ color: labelColor }}>{server.egg}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 text-[10px]" style={{ color: labelColor }}>
+          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.memory || 0}MB</span>
+          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.cpuPercent || 0}%</span>
+          <span className="px-1.5 py-0.5 rounded" style={{ background: inputBg }}>{server.resources?.disk || 0}MB</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {server.status === 'running' ? (
+            <button
+              onClick={() => onStop(server)}
+              className="flex-1 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
+              style={{ background: 'rgba(239,68,68,0.15)', color: '#ef4444' }}
+            >
+              {lang === 'vi' ? 'Dừng' : 'Stop'}
+            </button>
+          ) : (
+            <button
+              onClick={() => onStart(server)}
+              className="flex-1 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
+              style={{ background: 'rgba(34,197,94,0.15)', color: '#22c55e' }}
+            >
+              {lang === 'vi' ? 'Khởi động' : 'Start'}
+            </button>
+          )}
+          <button
+            onClick={() => onRestart(server)}
+            className="px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors"
+            style={{ background: inputBg, color: labelColor }}
+          >
+            {lang === 'vi' ? 'Khởi động lại' : 'Restart'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function HomePage({ theme, lang }) {
-  const [activeTab, setActiveTab] = useState('server')
+  const [activeTab, setActiveTab] = useState('servers')
   const [tabFade, setTabFade] = useState(true)
-  const [prevTab, setPrevTab] = useState('server')
+  const [prevTab, setPrevTab] = useState('servers')
   const [selectedGame, setSelectedGame] = useState(null)
+  const [servers, setServers] = useState([])
+  const [loadingServers, setLoadingServers] = useState(true)
 
   const [versions, setVersions] = useState(null)
   const [modpacks, setModpacks] = useState([])
@@ -613,6 +713,14 @@ function HomePage({ theme, lang }) {
     window.electronAPI.getSystemInfo().then((res) => {
       if (res?.ok) setSystemInfo(res)
     }).catch(() => {})
+
+    const loadServers = () => {
+      window.electronAPI.getServerConfigs().then((res) => {
+        if (res?.ok) setServers(res.configs || [])
+        setLoadingServers(false)
+      }).catch(() => setLoadingServers(false))
+    }
+    loadServers()
   }, [])
 
   const bg = theme === 'light' ? '#f5f5f5' : '#0a0a0a'
@@ -663,6 +771,46 @@ function HomePage({ theme, lang }) {
     }
   }
 
+  const handleStartServer = async (server) => {
+    if (!isElectron) return
+    try {
+      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'installing' } : s))
+      await window.electronAPI.startServer({ name: server.name, egg: server.eggId, dockerImage: server.dockerImage, config: server.config, resources: server.resources })
+      const res = await window.electronAPI.getServerConfigs()
+      if (res?.ok) setServers(res.configs || [])
+    } catch (err) {
+      console.error('Start server failed:', err)
+      const res = await window.electronAPI.getServerConfigs()
+      if (res?.ok) setServers(res.configs || [])
+    }
+  }
+
+  const handleStopServer = async (server) => {
+    if (!isElectron) return
+    try {
+      await window.electronAPI.stopServer(server.name)
+      const res = await window.electronAPI.getServerConfigs()
+      if (res?.ok) setServers(res.configs || [])
+    } catch (err) {
+      console.error('Stop server failed:', err)
+    }
+  }
+
+  const handleRestartServer = async (server) => {
+    if (!isElectron) return
+    try {
+      await window.electronAPI.stopServer(server.name)
+      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'installing' } : s))
+      await window.electronAPI.startServer({ name: server.name, egg: server.eggId, dockerImage: server.dockerImage, config: server.config, resources: server.resources })
+      const res = await window.electronAPI.getServerConfigs()
+      if (res?.ok) setServers(res.configs || [])
+    } catch (err) {
+      console.error('Restart server failed:', err)
+      const res = await window.electronAPI.getServerConfigs()
+      if (res?.ok) setServers(res.configs || [])
+    }
+  }
+
   useEffect(() => {
     setVisibleCount(20)
   }, [versions])
@@ -681,6 +829,16 @@ function HomePage({ theme, lang }) {
     <div className="h-full flex flex-col" style={{ background: bg }}>
       {/* Tab bar - fixed, not scrolling */}
       <div className="shrink-0 flex items-center justify-center gap-2 px-6 py-3" style={{ borderBottom: `1px solid ${cardBorder}` }}>
+        <button
+          onClick={() => handleTabChange('servers')}
+          className="px-5 py-2 rounded-xl text-sm font-semibold transition-all"
+          style={{
+            background: activeTab === 'servers' ? 'rgba(167,139,250,0.15)' : 'transparent',
+            color: activeTab === 'servers' ? '#a78bfa' : labelColor,
+          }}
+        >
+          {lang === 'vi' ? 'Danh sách' : 'Servers'}
+        </button>
         <button
           onClick={() => handleTabChange('server')}
           className="px-5 py-2 rounded-xl text-sm font-semibold transition-all"
@@ -706,6 +864,34 @@ function HomePage({ theme, lang }) {
       {/* Content - scrollable */}
       <div className="flex-1 overflow-auto">
         <div style={{ opacity: tabFade ? 1 : 0, transition: 'opacity 0.2s ease' }}>
+        {prevTab === 'servers' && (
+          <div className="p-6">
+            <div className="max-w-4xl mx-auto">
+              {loadingServers ? (
+                <p className="text-xs text-center py-12" style={{ color: labelColor }}>{t(lang, 'home.loading')}</p>
+              ) : servers.length === 0 ? (
+                <div className="text-center py-16">
+                  <p className="text-sm" style={{ color: labelColor }}>{lang === 'vi' ? 'Chưa có server nào. Tạo server đầu tiên!' : 'No servers yet. Create your first server!'}</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  {servers.map((server, i) => (
+                    <ServerCard
+                      key={server.id || i}
+                      server={server}
+                      theme={theme}
+                      lang={lang}
+                      onStart={handleStartServer}
+                      onStop={handleStopServer}
+                      onRestart={handleRestartServer}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {prevTab === 'server' && (
           <div className="p-6">
             <div className="max-w-4xl mx-auto">
