@@ -1,0 +1,60 @@
+# Maintainer: FoxStudio <contact@foxstudio.dev>
+# Local build from dist-electron/linux-unpacked/
+pkgname=terver-panel
+_appname="TerverPanel"
+_binname=terver-panel
+pkgver=1.0.0
+pkgrel=3
+pkgdesc="TerverPanel - Gaming Hosting Launcher for Minecraft (local build)"
+arch=('x86_64')
+url="https://github.com/foxstudio-201/VoxelXClient"
+license=('MIT')
+depends=('gtk3' 'nss' 'alsa-lib' 'libnotify')
+optdepends=('libappindicator-gtk3: tray icon support')
+provides=("${_binname}")
+conflicts=("${_binname}")
+options=('!strip' '!debug')
+
+source=("linux-unpacked.tar.xz" "dino-isekai.png")
+sha256sums=('SKIP' 'SKIP')
+
+prepare() {
+  cd "${srcdir}"
+  rm -rf linux-unpacked
+  tar -xf linux-unpacked.tar.xz
+}
+
+package() {
+  cd "${srcdir}"
+
+  install -d "${pkgdir}/opt/${_appname}"
+  cp -r linux-unpacked/* "${pkgdir}/opt/${_appname}/"
+  cp -r linux-unpacked/.[!.]* "${pkgdir}/opt/${_appname}/" 2>/dev/null || true
+
+  # Bỏ file không cần thiết để giảm dung lượng gói
+  rm -f "${pkgdir}/opt/${_appname}/LICENSES.chromium.html"
+  rm -f "${pkgdir}/opt/${_appname}/chrome_crashpad_handler"
+  rm -f "${pkgdir}/opt/${_appname}/libvulkan.so.1"
+
+  chmod 4755 "${pkgdir}/opt/${_appname}/chrome-sandbox"
+
+  install -d "${pkgdir}/usr/bin"
+  ln -sf "/opt/${_appname}/${_binname}" "${pkgdir}/usr/bin/${_binname}"
+
+  install -d "${pkgdir}/usr/share/applications"
+  cat > "${pkgdir}/usr/share/applications/${_binname}.desktop" << EOF
+[Desktop Entry]
+Name=${_appname}
+Comment=${pkgdesc}
+Exec="/opt/${_appname}/${_binname}" %U
+Terminal=false
+Type=Application
+Icon=${_binname}
+Categories=Game;
+StartupWMClass=${_appname}
+EOF
+
+  install -d "${pkgdir}/usr/share/icons/hicolor/512x512/apps"
+  install -m 644 "${srcdir}/dino-isekai.png" \
+    "${pkgdir}/usr/share/icons/hicolor/512x512/apps/${_binname}.png"
+}

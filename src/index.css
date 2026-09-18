@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* Changelog HTML content styling */
+.changelog-content h2 {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  margin: 12px 0 6px;
+}
+.changelog-content h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.9);
+  margin: 10px 0 4px;
+}
+.changelog-content ul {
+  list-style: disc;
+  padding-left: 16px;
+  margin: 4px 0;
+}
+.changelog-content li {
+  margin: 2px 0;
+  line-height: 1.5;
+}
+.changelog-content strong {
+  color: rgba(255,255,255,0.9);
+  font-weight: 600;
+}
+.changelog-content em {
+  font-style: italic;
+  color: rgba(255,255,255,0.6);
+}
+.changelog-content p {
+  margin: 4px 0;
+  line-height: 1.6;
+}
+.changelog-content img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.fade-banner {
+  transition: opacity 0.3s ease;
+}
+
+.modal-backdrop {
+  animation: fadeIn 0.2s ease;
+}
+.modal-backdrop.closing {
+  animation: fadeOut 0.2s ease forwards;
+}
+.modal-content {
+  animation: slideUp 0.25s ease;
+}
+.modal-content.closing {
+  animation: slideDown 0.2s ease forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes slideDown {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(20px) scale(0.97); }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: #0a0a0a;
+    color: #ffffff;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+}
+
+@layer utilities {
+  .drag-region {
+    -webkit-app-region: drag;
+    pointer-events: auto;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .glass-panel {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 4px !important;
+  height: 4px !important;
+}
+::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.10) !important;
+  border-radius: 99px !important;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a78bfa !important;
+}
+::-webkit-scrollbar-corner {
+  background: transparent !important;
+}

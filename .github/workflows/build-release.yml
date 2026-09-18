@@ -1,0 +1,393 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Windows ──────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts
+
+      - name: Generate app secret
+        run: node scripts/gen-app-secret.cjs
+
+      - name: Embed GitHub token for data sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: node scripts/gen-build-env.cjs
+
+      - name: Fix BOM in package.json
+        shell: pwsh
+        run: |
+          $file = "package.json"
+          $bytes = [System.IO.File]::ReadAllBytes($file)
+          if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $content = [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($file, $content, $utf8NoBom)
+            Write-Host "Removed BOM from package.json"
+          } else {
+            Write-Host "No BOM in package.json"
+          }
+
+      - name: Download Electron binary
+        run: npx electron --version
+
+      - name: Setup code signing certificate
+        shell: pwsh
+        env:
+          CSC_BASE64: ${{ secrets.CSC_BASE64 }}
+        run: |
+          if ($env:CSC_BASE64) {
+            New-Item -ItemType Directory -Path "certs" -Force | Out-Null
+            $bytes = [Convert]::FromBase64String($env:CSC_BASE64)
+            [IO.File]::WriteAllBytes("certs/code-signing.pfx", $bytes)
+            Write-Host "Certificate restored from secret"
+          } else {
+            Write-Host "No certificate secret found, building without signing"
+          }
+
+      - name: Build Vite
+        run: npm run build
+
+      - name: Build Electron (Windows)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          $certPath = "certs/code-signing.pfx"
+          if (Test-Path $certPath) {
+            $env:CSC_LINK = $certPath
+            Write-Host "Building with code signing"
+          } else {
+            Write-Host "Building without code signing"
+          }
+          npx electron-builder --win --x64 --publish never
+
+      - name: Get version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dino Isekai-Windows-${{ steps.version.outputs.VERSION }}
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.zip
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ── Linux ─────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libnotify-dev \
+            libnss3 \
+            libxss1 \
+            libxtst6 \
+            xauth \
+            xvfb \
+            libgbm-dev \
+            libasound2-dev \
+            rpm
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts
+
+      - name: Generate app secret
+        run: node scripts/gen-app-secret.cjs
+
+      - name: Embed GitHub token for data sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: node scripts/gen-build-env.cjs
+
+      - name: Fix BOM in package.json
+        run: |
+          python3 -c "
+          import sys
+          with open('package.json', 'rb') as f:
+              data = f.read()
+          if data[:3] == b'\\xef\\xbb\\xbf':
+              with open('package.json', 'wb') as f:
+                  f.write(data[3:])
+              print('Removed BOM from package.json')
+          else:
+              print('No BOM in package.json')
+          "
+
+      - name: Build Vite
+        run: npm run build
+
+      - name: Build Electron (Linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --linux --x64 --publish never
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dino Isekai-Linux-${{ steps.version.outputs.VERSION }}
+          path: |
+            dist-electron/*.AppImage
+            dist-electron/*.deb
+            dist-electron/*.rpm
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ── macOS ─────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts
+
+      - name: Generate app secret
+        run: node scripts/gen-app-secret.cjs
+
+      - name: Embed GitHub token for data sync
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: node scripts/gen-build-env.cjs
+
+      - name: Fix BOM in package.json
+        run: |
+          python3 -c "
+          import sys
+          with open('package.json', 'rb') as f:
+              data = f.read()
+          if data[:3] == b'\\xef\\xbb\\xbf':
+              with open('package.json', 'wb') as f:
+                  f.write(data[3:])
+              print('Removed BOM from package.json')
+          else:
+              print('No BOM in package.json')
+          "
+
+      - name: Build Vite
+        run: npm run build
+
+      - name: Build Electron (macOS)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --mac --x64 --arm64 --publish never
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dino Isekai-macOS-${{ steps.version.outputs.VERSION }}
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ── Create Release (after all builds) ────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Dino Isekai-Windows-${{ steps.version.outputs.VERSION }}
+          path: release-files/windows
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Dino Isekai-Linux-${{ steps.version.outputs.VERSION }}
+          path: release-files/linux
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Dino Isekai-macOS-${{ steps.version.outputs.VERSION }}
+          path: release-files/macos
+
+      - name: List release files
+        run: find release-files -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Dino Isekai
+          body: |
+            ## Dino Isekai v${{ steps.version.outputs.VERSION }}
+
+            <div align="center">
+            <br/>
+            <img src="https://raw.githubusercontent.com/foxstudio-201/dinoisekailauncher/main/public/icon.png" width="80" height="80" alt="Dino Isekai Logo" />
+            <h1>Dino Isekai</h1>
+            <p><strong>The Ultimate Minecraft Launcher</strong><br/>Manage profiles, install mods, and launch any Minecraft version — all in one place.</p>
+            <p>
+            <img src="https://img.shields.io/badge/version-${{ steps.version.outputs.VERSION }}-4ade80?style=flat-square&labelColor=0a0a0a" alt="Version" />
+            <img src="https://img.shields.io/badge/Windows-0078D4?style=flat-square&labelColor=0a0a0a&logo=windows11&logoColor=0078D4" alt="Windows" />
+            <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&labelColor=0a0a0a&logo=linux&logoColor=FCC624" alt="Linux" />
+            <img src="https://img.shields.io/badge/Arch_(AUR)-1793D1?style=flat-square&labelColor=0a0a0a&logo=archlinux&logoColor=1793D1" alt="Arch AUR" />
+            <img src="https://img.shields.io/badge/macOS-white?style=flat-square&labelColor=0a0a0a&logo=apple&logoColor=white" alt="macOS" />
+            <img src="https://img.shields.io/badge/electron-42-47848F?style=flat-square&labelColor=0a0a0a&logo=electron" alt="Electron" />
+            <img src="https://img.shields.io/badge/react-19-61DAFB?style=flat-square&labelColor=0a0a0a&logo=react" alt="React" />
+            <img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square&labelColor=0a0a0a" alt="License" />
+            </p>
+            <p>
+            <a href="https://github.com/foxstudio-201/dinoisekailauncher">🌐 GitHub</a> &nbsp;·&nbsp;
+            <a href="https://join.foxstudio.site">💬 Discord</a>
+            </p>
+            </div>
+
+            ### ⬇️ Download
+
+            | Nền tảng | File | Ghi chú |
+            |----------|------|---------|
+            | <img src="https://api.iconify.design/ph:windows-logo-duotone.svg?color=%234aa3df&width=18" width="18" align="absmiddle" /> Windows | `Dino Isekai Setup ${{ steps.version.outputs.VERSION }}.exe` | Installer (khuyến nghị) |
+            | <img src="https://api.iconify.design/ph:windows-logo-duotone.svg?color=%234aa3df&width=18" width="18" align="absmiddle" /> Windows | `Dino Isekai ${{ steps.version.outputs.VERSION }}.exe` | Portable, không cần cài |
+            | <img src="https://api.iconify.design/ph:linux-logo-duotone.svg?color=%23e0a23b&width=18" width="18" align="absmiddle" /> Linux | `Dino Isekai-${{ steps.version.outputs.VERSION }}.AppImage` | Chạy trực tiếp |
+            | <img src="https://api.iconify.design/ph:linux-logo-duotone.svg?color=%23e0a23b&width=18" width="18" align="absmiddle" /> Linux | `dino-isekai_${{ steps.version.outputs.VERSION }}_amd64.deb` | Debian / Ubuntu |
+            | <img src="https://api.iconify.design/simple-icons:archlinux.svg?color=%231793D1&width=18" width="18" align="absmiddle" /> Arch | `yay -S dino-isekai-bin` | Arch Linux / AUR |
+            | <img src="https://api.iconify.design/ph:apple-logo-duotone.svg?color=%23b0b0b0&width=18" width="18" align="absmiddle" /> macOS | `Dino Isekai-${{ steps.version.outputs.VERSION }}-arm64.dmg` | Apple Silicon (M1/M2/M3) |
+            | <img src="https://api.iconify.design/ph:apple-logo-duotone.svg?color=%23b0b0b0&width=18" width="18" align="absmiddle" /> macOS | `Dino Isekai-${{ steps.version.outputs.VERSION }}-x64.dmg` | Intel Mac |
+
+            > **Yêu cầu:** Windows 10/11 (64-bit), Linux x64, hoặc macOS 11+
+            > <img src="https://api.iconify.design/ph:windows-logo-duotone.svg?color=%234aa3df&width=18" width="18" align="absmiddle" /> Windows: SmartScreen có thể cảnh báo lần đầu — nhấn **More info** → **Run anyway**
+            > <img src="https://api.iconify.design/ph:linux-logo-duotone.svg?color=%23e0a23b&width=18" width="18" align="absmiddle" /> Linux AppImage: `chmod +x Dino Isekai*.AppImage && ./Dino Isekai*.AppImage`
+            > <img src="https://api.iconify.design/ph:apple-logo-duotone.svg?color=%23b0b0b0&width=18" width="18" align="absmiddle" /> macOS: App chưa ký — mở lần đầu hãy **chuột phải → Open**, rồi xác nhận **Open**
+          files: |
+            release-files/windows/*.exe
+            release-files/windows/*.zip
+            release-files/linux/*.AppImage
+            release-files/linux/*.deb
+            release-files/linux/*.rpm
+            release-files/macos/*.dmg
+            release-files/macos/*.zip
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Publish to AUR (after release assets are live) ───────────────────────────
+  publish-aur:
+    name: Publish to AUR
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check AUR secret
+        id: guard
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$AUR_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUR_SSH_PRIVATE_KEY not set — skipping AUR publish"
+          fi
+
+      - name: Get version
+        id: version
+        if: steps.guard.outputs.enabled == 'true'
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump pkgver in PKGBUILD
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.VERSION }}/" packaging/aur/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" packaging/aur/PKGBUILD
+
+      - name: Publish to AUR
+        if: steps.guard.outputs.enabled == 'true'
+        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        with:
+          pkgname: dino-isekai-bin
+          pkgbuild: ./packaging/aur/PKGBUILD
+          assets: |
+            ./packaging/aur/README.md
+          commit_username: FoxStudio
+          commit_email: contact@foxstudio.dev
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.version.outputs.VERSION }}"
+          updpkgsums: true
+          ssh_keyscan_types: rsa,ecdsa,ed25519
