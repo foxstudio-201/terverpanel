@@ -115,17 +115,18 @@ function NodePage({ theme, lang }) {
   const handleDockerInstall = async () => {
     if (!isElectron) return
     setDockerInstalling(true)
-    setDockerLog(t(lang, 'docker.install.start'))
+    setDockerLog((lang === 'vi' ? '[INFO] Đang kiểm tra hệ thống...\n' : '[INFO] Checking system...\n'))
+    setTimeout(() => setDockerLog(prev => prev + (lang === 'vi' ? '[INFO] Đang tải Docker install script...\n' : '[INFO] Downloading Docker install script...\n')), 500)
     try {
       const res = await window.electronAPI.installDocker()
       if (res?.ok) {
-        setDockerLog(t(lang, 'docker.install.success') + '\n' + (res.version || ''))
+        setDockerLog(prev => prev + (lang === 'vi' ? '[OK] Docker cài đặt thành công!\n' : '[OK] Docker installed successfully!\n') + (res.version || ''))
         refreshAll()
       } else {
-        setDockerLog(t(lang, 'docker.install.failed') + '\n' + (res?.error || ''))
+        setDockerLog(prev => prev + (lang === 'vi' ? '[LỖI] Cài Docker thất bại:\n' : '[ERROR] Docker install failed:\n') + (res?.error || ''))
       }
     } catch (err) {
-      setDockerLog(t(lang, 'docker.install.failed') + '\n' + err.message)
+      setDockerLog(prev => prev + (lang === 'vi' ? '[LỖI] Cài Docker thất bại:\n' : '[ERROR] Docker install failed:\n') + err.message)
     }
     setDockerInstalling(false)
   }
@@ -139,17 +140,19 @@ function NodePage({ theme, lang }) {
   const handleWingsInstall = async () => {
     if (!isElectron) return
     setWingsInstalling(true)
-    setWingsLog(lang === 'vi' ? 'Đang tải Wings từ GitHub...' : 'Downloading Wings from GitHub...')
+    setWingsLog((lang === 'vi' ? '[INFO] Đang kiểm tra kiến trúc hệ thống...\n' : '[INFO] Checking system architecture...\n'))
+    setTimeout(() => setWingsLog(prev => prev + (lang === 'vi' ? '[INFO] Đang tải Wings từ GitHub...\n' : '[INFO] Downloading Wings from GitHub...\n')), 500)
+    setTimeout(() => setWingsLog(prev => prev + (lang === 'vi' ? '[INFO] Đang cài đặt binary...\n' : '[INFO] Installing binary...\n')), 2000)
     try {
       const res = await window.electronAPI.installWings()
       if (res?.ok) {
-        setWingsLog((lang === 'vi' ? 'Cài đặt thành công!\n' : 'Installed successfully!\n') + `Version: ${res.version}\nArch: ${res.arch}\nInit: ${res.initSystem}`)
+        setWingsLog(prev => prev + (lang === 'vi' ? '[OK] Wings cài đặt thành công!\n' : '[OK] Wings installed successfully!\n') + `Version: ${res.version}\nArch: ${res.arch}\nInit: ${res.initSystem}`)
         refreshAll()
       } else {
-        setWingsLog((lang === 'vi' ? 'Cài đặt thất bại\n' : 'Installation failed\n') + (res?.error || ''))
+        setWingsLog(prev => prev + (lang === 'vi' ? '[LỖI] Cài Wings thất bại:\n' : '[ERROR] Wings install failed:\n') + (res?.error || ''))
       }
     } catch (err) {
-      setWingsLog((lang === 'vi' ? 'Cài đặt thất bại\n' : 'Installation failed\n') + err.message)
+      setWingsLog(prev => prev + (lang === 'vi' ? '[LỖI] Cài Wings thất bại:\n' : '[ERROR] Wings install failed:\n') + err.message)
     }
     setWingsInstalling(false)
   }
@@ -175,16 +178,18 @@ function NodePage({ theme, lang }) {
   const handleCfInstall = async () => {
     if (!isElectron) return
     setCfInstalling(true)
-    setCfLog(lang === 'vi' ? 'Đang cài đặt cloudflared...' : 'Installing cloudflared...')
+    setCfLog((lang === 'vi' ? '[INFO] Đang kiểm tra kiến trúc hệ thống...\n' : '[INFO] Checking system architecture...\n'))
+    setTimeout(() => setCfLog(prev => prev + (lang === 'vi' ? '[INFO] Đang tải cloudflared từ GitHub...\n' : '[INFO] Downloading cloudflared from GitHub...\n')), 500)
+    setTimeout(() => setCfLog(prev => prev + (lang === 'vi' ? '[INFO] Đang cài đặt binary...\n' : '[INFO] Installing binary...\n')), 2000)
     try {
       const info = await window.electronAPI.getSystemInfo()
       const arch = info?.os?.arch || 'x86_64'
       const res = await window.electronAPI.installCloudflared(arch)
       if (res?.ok) {
-        setCfLog((lang === 'vi' ? 'Cài đặt thành công!\n' : 'Installed successfully!\n') + `Version: ${res.version}`)
+        setCfLog(prev => prev + (lang === 'vi' ? '[OK] cloudflared cài đặt thành công!\n' : '[OK] cloudflared installed successfully!\n') + `Version: ${res.version}`)
         refreshAll()
       } else {
-        setCfLog((lang === 'vi' ? 'Cài đặt thất bại\n' : 'Installation failed\n') + (res?.error || ''))
+        setCfLog(prev => prev + (lang === 'vi' ? '[LỖI] Cài cloudflared thất bại:\n' : '[ERROR] cloudflared install failed:\n') + (res?.error || ''))
       }
     } catch (err) {
       setCfLog((lang === 'vi' ? 'Cài đặt thất bại\n' : 'Installation failed\n') + err.message)
@@ -462,27 +467,20 @@ function NodePage({ theme, lang }) {
               </button>
             </div>
           )}
-
-          {dockerLog && (
-            <div className="pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
-              <div className="relative">
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(dockerLog)
-                    setCopiedKey('docker')
-                    setTimeout(() => setCopiedKey(null), 1500)
-                  }}
-                  className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
-                  style={{ background: copiedKey === 'docker' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'docker' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
-                >
-                  {copiedKey === 'docker' ? '✓ Copied' : 'Copy'}
-                </button>
-                <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
-                  {dockerLog}
-                </pre>
-              </div>
+          <div className="pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
+            <div className="relative">
+              <button
+                onClick={() => dockerLog && navigator.clipboard.writeText(dockerLog)}
+                className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
+                style={{ background: copiedKey === 'docker' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'docker' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
+              >
+                {copiedKey === 'docker' ? '✓ Copied' : 'Copy'}
+              </button>
+              <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                {dockerLog || (docker?.installed ? (docker?.running ? (lang === 'vi' ? 'Docker đang chạy bình thường.' : 'Docker is running normally.') : (lang === 'vi' ? 'Docker đã cài nhưng chưa chạy.' : 'Docker installed but not running.')) : (lang === 'vi' ? 'Docker chưa cài đặt. Nhấn nút "Cài Docker" để bắt đầu.' : 'Docker not installed. Click "Install Docker" to begin.'))}
+              </pre>
             </div>
-          )}
+          </div>
         </SectionCard>
 
         <SectionCard
@@ -550,27 +548,20 @@ function NodePage({ theme, lang }) {
               </button>
             </div>
           )}
-
-          {wingsLog && (
-            <div className="pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
-              <div className="relative">
-                <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(wingsLog)
-                    setCopiedKey('wings')
-                    setTimeout(() => setCopiedKey(null), 1500)
-                  }}
-                  className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
-                  style={{ background: copiedKey === 'wings' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wings' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
-                >
-                  {copiedKey === 'wings' ? '✓ Copied' : 'Copy'}
-                </button>
-                <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
-                  {wingsLog}
-                </pre>
-              </div>
+          <div className="pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
+            <div className="relative">
+              <button
+                onClick={() => wingsLog && navigator.clipboard.writeText(wingsLog)}
+                className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
+                style={{ background: copiedKey === 'wings' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wings' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
+              >
+                {copiedKey === 'wings' ? '✓ Copied' : 'Copy'}
+              </button>
+              <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                {wingsLog || (wings?.installed ? (wings?.running ? (lang === 'vi' ? 'Wings đang chạy bình thường.' : 'Wings is running normally.') : (lang === 'vi' ? 'Wings đã cài nhưng chưa chạy.' : 'Wings installed but not running.')) : (lang === 'vi' ? 'Wings chưa cài đặt. Nhấn nút "Cài Wings" để bắt đầu.' : 'Wings not installed. Click "Install Wings" to begin.'))}
+              </pre>
             </div>
-          )}
+          </div>
 
           {wings?.installed && !wings.hasConfig && (
               <div className="space-y-3 pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
@@ -652,40 +643,36 @@ function NodePage({ theme, lang }) {
             icon={<svg className="w-4 h-4" style={{ color: labelColor }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="8 13 12 17 16 11"/></svg>}
           >
             <div className="space-y-3">
-              {dockerLog && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-[10px] font-semibold uppercase" style={{ color: '#2496ed' }}>{lang === 'vi' ? 'Docker' : 'Docker'}</p>
-                    <button
-                      onClick={() => { navigator.clipboard.writeText(dockerLog); setCopiedKey('docker'); setTimeout(() => setCopiedKey(null), 1500) }}
-                      className="px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all"
-                      style={{ background: copiedKey === 'docker' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'docker' ? '#fff' : labelColor }}
-                    >
-                      {copiedKey === 'docker' ? '✓ Copied' : 'Copy'}
-                    </button>
-                  </div>
-                  <pre className="p-3 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
-                    {dockerLog}
-                  </pre>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[10px] font-semibold uppercase" style={{ color: '#2496ed' }}>{lang === 'vi' ? 'Docker' : 'Docker'}</p>
+                  <button
+                    onClick={() => dockerLog && navigator.clipboard.writeText(dockerLog)}
+                    className="px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all"
+                    style={{ background: copiedKey === 'docker' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'docker' ? '#fff' : labelColor }}
+                  >
+                    {copiedKey === 'docker' ? '✓ Copied' : 'Copy'}
+                  </button>
                 </div>
-              )}
-              {wingsLog && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <p className="text-[10px] font-semibold uppercase" style={{ color: '#06b6d4' }}>{lang === 'vi' ? 'Wings' : 'Wings'}</p>
-                    <button
-                      onClick={() => { navigator.clipboard.writeText(wingsLog); setCopiedKey('wings-ops'); setTimeout(() => setCopiedKey(null), 1500) }}
-                      className="px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all"
-                      style={{ background: copiedKey === 'wings-ops' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wings-ops' ? '#fff' : labelColor }}
-                    >
-                      {copiedKey === 'wings-ops' ? '✓ Copied' : 'Copy'}
-                    </button>
-                  </div>
-                  <pre className="p-3 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
-                    {wingsLog}
-                  </pre>
+                <pre className="p-3 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                  {dockerLog || (docker?.installed ? (docker?.running ? (lang === 'vi' ? 'Docker đang chạy.' : 'Docker running.') : (lang === 'vi' ? 'Docker đã cài, chưa chạy.' : 'Docker installed, not running.')) : (lang === 'vi' ? 'Docker chưa cài.' : 'Docker not installed.'))}
+                </pre>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-[10px] font-semibold uppercase" style={{ color: '#06b6d4' }}>{lang === 'vi' ? 'Wings' : 'Wings'}</p>
+                  <button
+                    onClick={() => wingsLog && navigator.clipboard.writeText(wingsLog)}
+                    className="px-2 py-0.5 rounded-lg text-[10px] font-semibold transition-all"
+                    style={{ background: copiedKey === 'wings-ops' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wings-ops' ? '#fff' : labelColor }}
+                  >
+                    {copiedKey === 'wings-ops' ? '✓ Copied' : 'Copy'}
+                  </button>
                 </div>
-              )}
+                <pre className="p-3 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+                  {wingsLog || (wings?.installed ? (wings?.running ? (lang === 'vi' ? 'Wings đang chạy.' : 'Wings running.') : (lang === 'vi' ? 'Wings đã cài, chưa chạy.' : 'Wings installed, not running.')) : (lang === 'vi' ? 'Wings chưa cài.' : 'Wings not installed.'))}
+                </pre>
+              </div>
             </div>
           </SectionCard>
         )}
@@ -763,25 +750,18 @@ function NodePage({ theme, lang }) {
               </div>
             </div>
           )}
-
-          {cfLog && (
-            <div className="relative">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(cfLog)
-                  setCopiedKey('cf')
-                  setTimeout(() => setCopiedKey(null), 1500)
-                }}
-                className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
-                style={{ background: copiedKey === 'cf' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'cf' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
-              >
-                {copiedKey === 'cf' ? '✓ Copied' : 'Copy'}
-              </button>
-              <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
-                {cfLog}
-              </pre>
-            </div>
-          )}
+          <div className="relative">
+            <button
+              onClick={() => cfLog && navigator.clipboard.writeText(cfLog)}
+              className="absolute top-2 right-2 px-2 py-1 rounded-lg text-[10px] font-semibold transition-all z-10"
+              style={{ background: copiedKey === 'cf' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'cf' ? '#fff' : labelColor, border: `1px solid ${inputBorder}` }}
+            >
+              {copiedKey === 'cf' ? '✓ Copied' : 'Copy'}
+            </button>
+            <pre className="p-3 pr-16 rounded-xl text-[11px] whitespace-pre-wrap" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>
+              {cfLog || (cloudflare?.installed ? (lang === 'vi' ? 'cloudflared đã cài đặt. Nhập thông tin tunnel để tạo.' : 'cloudflared installed. Enter tunnel info to create.') : (lang === 'vi' ? 'cloudflared chưa cài. Nhấn nút "Cài cloudflared" để bắt đầu.' : 'cloudflared not installed. Click "Install cloudflared" to begin.'))}
+            </pre>
+          </div>
         </SectionCard>
 
       </div>
@@ -909,12 +889,10 @@ function NodePage({ theme, lang }) {
                         {wizardProcessing ? (lang === 'vi' ? 'Đang cài...' : 'Installing...') : (lang === 'vi' ? 'Cài đặt Docker' : 'Install Docker')}
                       </button>
                     )}
-                    {wizardDockerLog && (
-                      <div className="relative">
-                        <button onClick={() => { navigator.clipboard.writeText(wizardDockerLog); setCopiedKey('wd'); setTimeout(() => setCopiedKey(null), 1500) }} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'wd' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wd' ? '#fff' : labelColor }}>{copiedKey === 'wd' ? '✓' : 'Copy'}</button>
-                        <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-32 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardDockerLog}</pre>
-                      </div>
-                    )}
+                    <div className="relative">
+                      <button onClick={() => wizardDockerLog && navigator.clipboard.writeText(wizardDockerLog)} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'wd' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wd' ? '#fff' : labelColor }}>{copiedKey === 'wd' ? '✓' : 'Copy'}</button>
+                      <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-32 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardDockerLog || (lang === 'vi' ? 'Sẵn sàng. Nhấn "Cài đặt Docker" để bắt đầu.' : 'Ready. Click "Install Docker" to begin.')}</pre>
+                    </div>
                   </div>
                 )}
 
@@ -936,12 +914,10 @@ function NodePage({ theme, lang }) {
                         <span className="text-[11px] font-semibold" style={{ color: '#06b6d4' }}>✓ Wings {lang === 'vi' ? 'đã cài đặt' : 'already installed'}</span>
                       </div>
                     )}
-                    {wizardWingsLog && (
-                      <div className="relative">
-                        <button onClick={() => { navigator.clipboard.writeText(wizardWingsLog); setCopiedKey('ww'); setTimeout(() => setCopiedKey(null), 1500) }} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'ww' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'ww' ? '#fff' : labelColor }}>{copiedKey === 'ww' ? '✓' : 'Copy'}</button>
-                        <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-24 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardWingsLog}</pre>
-                      </div>
-                    )}
+                    <div className="relative">
+                      <button onClick={() => wizardWingsLog && navigator.clipboard.writeText(wizardWingsLog)} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'ww' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'ww' ? '#fff' : labelColor }}>{copiedKey === 'ww' ? '✓' : 'Copy'}</button>
+                      <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-24 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardWingsLog || (lang === 'vi' ? 'Sẵn sàng. Nhấn "Cài đặt Wings" để bắt đầu.' : 'Ready. Click "Install Wings" to begin.')}</pre>
+                    </div>
                     {wings?.installed && !wings?.hasConfig && (
                       <button
                         onClick={handleWingsConfigGenerate}
@@ -952,8 +928,13 @@ function NodePage({ theme, lang }) {
                       </button>
                     )}
                     {wings?.hasConfig && (
-                      <div className="p-2 rounded-xl text-[10px]" style={{ background: '#22c55e20', border: '1px solid #22c55e40', color: '#22c55e' }}>
-                        ✓ {lang === 'vi' ? 'Wings đã được cấu hình' : 'Wings is configured'}
+                      <div className="space-y-2">
+                        <div className="p-2 rounded-xl text-[10px]" style={{ background: '#22c55e20', border: '1px solid #22c55e40', color: '#22c55e' }}>
+                          ✓ {lang === 'vi' ? 'Wings đã được cấu hình' : 'Wings is configured'}
+                        </div>
+                        <button onClick={() => setWizardStep(2)} className="w-full py-2 rounded-xl text-xs font-semibold transition-all" style={{ background: '#06b6d4', color: '#fff' }}>
+                          {lang === 'vi' ? 'Tiếp tục → Cloudflare Tunnel' : 'Continue → Cloudflare Tunnel'}
+                        </button>
                       </div>
                     )}
                   </div>
@@ -981,12 +962,10 @@ function NodePage({ theme, lang }) {
                             {lang === 'vi' ? 'Kiểm tra' : 'Check Auth'}
                           </button>
                         </div>
-                        {wizardCfLog && (
-                          <div className="relative">
-                            <button onClick={() => { navigator.clipboard.writeText(wizardCfLog); setCopiedKey('wc'); setTimeout(() => setCopiedKey(null), 1500) }} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'wc' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wc' ? '#fff' : labelColor }}>{copiedKey === 'wc' ? '✓' : 'Copy'}</button>
-                            <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-24 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardCfLog}</pre>
-                          </div>
-                        )}
+                        <div className="relative">
+                          <button onClick={() => wizardCfLog && navigator.clipboard.writeText(wizardCfLog)} className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[9px] font-semibold transition-all z-10" style={{ background: copiedKey === 'wc' ? '#22c55e' : 'rgba(128,128,128,0.2)', color: copiedKey === 'wc' ? '#fff' : labelColor }}>{copiedKey === 'wc' ? '✓' : 'Copy'}</button>
+                          <pre className="p-3 pr-12 rounded-xl text-[10px] whitespace-pre-wrap max-h-24 overflow-auto" style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: labelColor }}>{wizardCfLog || (lang === 'vi' ? 'Sẵn sàng. Nhấn "Đăng nhập Cloudflare" để bắt đầu.' : 'Ready. Click "Login Cloudflare" to begin.')}</pre>
+                        </div>
                         <div className="space-y-2 pt-2" style={{ borderTop: `1px solid ${inputBorder}` }}>
                           <p className="text-[10px] font-semibold uppercase" style={{ color: labelColor }}>{lang === 'vi' ? 'Cấu hình Tunnel' : 'Tunnel Configuration'}</p>
                           <input
