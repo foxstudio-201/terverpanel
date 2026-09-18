@@ -96,7 +96,7 @@ const GAME_ICONS = {
   terraria: './terraria_icon.png',
 }
 
-function GameModal({ game, theme, lang, onClose }) {
+function GameModal({ game, theme, lang, onClose, onServerCreated }) {
   const [closing, setClosing] = useState(false)
   const [eggs, setEggs] = useState([])
   const [selectedEgg, setSelectedEgg] = useState(null)
@@ -230,6 +230,7 @@ function GameModal({ game, theme, lang, onClose }) {
     if (isElectron) {
       try {
         await window.electronAPI.addServerConfig(serverData)
+        onServerCreated?.()
         handleClose()
       } catch (err) {
         console.error('Failed to save server config:', err)
@@ -664,13 +665,14 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart }) {
   )
 }
 
-function HomePage({ theme, lang }) {
+function HomePage({ theme, lang, onServerCreated }) {
   const [activeTab, setActiveTab] = useState('servers')
   const [tabFade, setTabFade] = useState(true)
   const [prevTab, setPrevTab] = useState('servers')
   const [selectedGame, setSelectedGame] = useState(null)
   const [servers, setServers] = useState([])
   const [loadingServers, setLoadingServers] = useState(true)
+  const [serverRefreshKey, setServerRefreshKey] = useState(0)
 
   const [versions, setVersions] = useState(null)
   const [modpacks, setModpacks] = useState([])
@@ -716,12 +718,12 @@ function HomePage({ theme, lang }) {
 
     const loadServers = () => {
       window.electronAPI.getServerConfigs().then((res) => {
-        if (res?.ok) setServers(res.configs || [])
+        if (res?.ok) setServers(res.servers || [])
         setLoadingServers(false)
       }).catch(() => setLoadingServers(false))
     }
     loadServers()
-  }, [])
+  }, [serverRefreshKey])
 
   const bg = theme === 'light' ? '#f5f5f5' : '#0a0a0a'
   const textColor = theme === 'light' ? '#111' : '#fff'
@@ -1097,7 +1099,7 @@ function HomePage({ theme, lang }) {
       </div>
 
       {selectedGame && (
-        <GameModal game={selectedGame} theme={theme} lang={lang} onClose={() => setSelectedGame(null)} />
+        <GameModal game={selectedGame} theme={theme} lang={lang} onClose={() => setSelectedGame(null)} onServerCreated={() => { onServerCreated?.(); setServerRefreshKey(k => k + 1) }} />
       )}
 
       {showChangelogModal && changelog?.content && (

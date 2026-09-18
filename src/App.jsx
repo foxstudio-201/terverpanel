@@ -74,7 +74,7 @@ function AppContent() {
         setPhase('idle')
       }
       window.electronAPI.getServerConfigs().then((res) => {
-        if (res?.ok) setSidebarServers(res.configs || [])
+        if (res?.ok) setSidebarServers(res.servers || [])
       }).catch(() => {})
     }
     checkSession()
@@ -97,6 +97,13 @@ function AppContent() {
     const timer = setTimeout(checkDocker, 1500)
     return () => clearTimeout(timer)
   }, [isElectron, displaySession])
+
+  const refreshSidebarServers = () => {
+    if (!isElectron) return
+    window.electronAPI.getServerConfigs().then((res) => {
+      if (res?.ok) setSidebarServers(res.servers || [])
+    }).catch(() => {})
+  }
 
   const handleCloseRequest = useCallback(async () => {
     if (!isElectron) return
@@ -185,94 +192,124 @@ function AppContent() {
     }
     return (
       <div className="flex flex-1 overflow-hidden relative pt-11">
-        <nav className="absolute left-0 top-11 bottom-0 z-50 w-[72px] flex flex-col items-center py-3 overflow-hidden">
-          <div className="flex flex-col items-center gap-1.5 px-2 py-2">
-            <div className="relative">
-              <button
-                onClick={() => setShowServerDropdown(!showServerDropdown)}
-                data-tip={lang === 'vi' ? 'Danh sách server' : 'Server List'}
-                className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
-              >
-                <List size={28} weight="duotone" className={`transition-all duration-200 ${showServerDropdown ? 'w-11 h-11' : 'w-9 h-9'}`} />
-              </button>
-              {showServerDropdown && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowServerDropdown(false)} />
-                  <div
-                    className="absolute left-[60px] top-0 z-50 w-64 rounded-xl overflow-hidden shadow-2xl"
-                    style={{ background: theme === 'light' ? '#fff' : '#1a1a1a', border: `1px solid ${borderColor}` }}
-                  >
-                    <div className="px-3 py-2" style={{ borderBottom: `1px solid ${borderColor}` }}>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide" style={{ color: labelColor }}>
-                        {lang === 'vi' ? 'Danh sách server' : 'Server List'}
-                      </p>
-                    </div>
-                    <div className="max-h-64 overflow-auto py-1">
-                      {sidebarServers.length === 0 ? (
-                        <p className="text-[11px] px-3 py-4 text-center" style={{ color: labelColor }}>
-                          {lang === 'vi' ? 'Chưa có server' : 'No servers'}
+        <nav className="absolute left-0 top-11 bottom-0 z-50 w-[180px] flex flex-col py-3" style={{ background: theme === 'light' ? '#fafafa' : '#0d0d0d', borderRight: `1px solid ${borderColor}` }}>
+          <div className="flex flex-col gap-1 px-2 py-1 flex-1">
+            {/* Server List dropdown trigger */}
+            {sidebarServers.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowServerDropdown(!showServerDropdown)}
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  style={{
+                    background: showServerDropdown ? 'rgba(167,139,250,0.12)' : 'transparent',
+                    color: showServerDropdown ? '#a78bfa' : labelColor,
+                  }}
+                >
+                  <List size={18} weight="duotone" />
+                  <span className="text-xs font-medium truncate">{lang === 'vi' ? 'Danh sách server' : 'Servers'}</span>
+                  <svg className={`w-3 h-3 ml-auto shrink-0 transition-transform ${showServerDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                </button>
+                {showServerDropdown && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowServerDropdown(false)} />
+                    <div
+                      className="absolute left-full top-0 z-50 w-72 rounded-xl overflow-hidden shadow-2xl ml-2"
+                      style={{ background: theme === 'light' ? '#fff' : '#1a1a1a', border: `1px solid ${borderColor}` }}
+                    >
+                      <div className="px-3 py-2.5" style={{ borderBottom: `1px solid ${borderColor}` }}>
+                        <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: labelColor }}>
+                          {lang === 'vi' ? 'Danh sách server' : 'Server List'}
                         </p>
-                      ) : (
-                        sidebarServers.map((srv, i) => {
-                          const statusColor = srv.status === 'running' ? '#22c55e' : srv.status === 'installing' ? '#eab308' : '#ef4444'
-                          return (
-                            <button
-                              key={srv.id || i}
-                              onClick={() => { setShowServerDropdown(false); navigateTo('servers') }}
-                              className="w-full px-3 py-2 flex items-center gap-2.5 transition-colors hover:bg-white/5"
-                            >
-                              <img
-                                src={srv.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
-                                alt=""
-                                className="w-7 h-7 rounded-lg object-contain shrink-0"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold truncate server-name-marquee" style={{ color: textColor }}>{srv.name}</p>
-                                <p className="text-[10px] truncate" style={{ color: labelColor }}>{srv.egg}</p>
-                              </div>
-                              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor }} />
-                            </button>
-                          )
-                        })
-                      )}
+                      </div>
+                      <div className="max-h-72 overflow-auto py-1">
+                        {sidebarServers.length === 0 ? (
+                          <p className="text-[11px] px-3 py-5 text-center" style={{ color: labelColor }}>
+                            {lang === 'vi' ? 'Chưa có server nào' : 'No servers yet'}
+                          </p>
+                        ) : (
+                          sidebarServers.map((srv, i) => {
+                            const statusColor = srv.status === 'running' ? '#22c55e' : srv.status === 'installing' ? '#eab308' : '#ef4444'
+                            return (
+                              <button
+                                key={srv.id || i}
+                                onClick={() => { setShowServerDropdown(false); navigateTo('servers') }}
+                                className="w-full px-3 py-2.5 flex items-center gap-2.5 transition-colors hover:bg-white/5"
+                              >
+                                <img
+                                  src={srv.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'}
+                                  alt=""
+                                  className="w-8 h-8 rounded-lg object-contain shrink-0"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs font-semibold truncate" style={{ color: textColor }}>{srv.name}</p>
+                                  <p className="text-[10px] truncate" style={{ color: labelColor }}>{srv.egg}</p>
+                                </div>
+                                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: statusColor }} />
+                              </button>
+                            )
+                          })
+                        )}
+                      </div>
                     </div>
-                  </div>
-                </>
-              )}
-            </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Home */}
             <button
               onClick={() => navigateTo('servers')}
-              data-tip={t(lang, 'sidebar.home')}
-              className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
+              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+              style={{
+                background: activePage === 'servers' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                color: activePage === 'servers' ? '#a78bfa' : labelColor,
+              }}
             >
-              <House size={28} weight="duotone" className={`transition-all duration-200 ${activePage === 'servers' ? 'w-11 h-11' : 'w-9 h-9'}`} />
+              <House size={18} weight="duotone" />
+              <span className="text-xs font-medium">{t(lang, 'sidebar.home')}</span>
             </button>
+
+            {/* Donate */}
             <button
               onClick={() => navigateTo('donate')}
-              data-tip={t(lang, 'home.donate')}
-              className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
+              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+              style={{
+                background: activePage === 'donate' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                color: activePage === 'donate' ? '#a78bfa' : labelColor,
+              }}
             >
-              <Heart size={28} weight="duotone" className={`transition-all duration-200 ${activePage === 'donate' ? 'w-11 h-11' : 'w-9 h-9'}`} />
+              <Heart size={18} weight="duotone" />
+              <span className="text-xs font-medium">{t(lang, 'home.donate')}</span>
             </button>
-             <button
+
+            {/* Node */}
+            <button
               onClick={() => navigateTo('docker')}
-              data-tip={lang === 'vi' ? 'Quản lý Node' : 'Node Management'}
-              className="w-14 h-14 shrink-0 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
+              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+              style={{
+                background: activePage === 'docker' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                color: activePage === 'docker' ? '#a78bfa' : labelColor,
+              }}
             >
-              <Cube size={28} weight="duotone" className={`transition-all duration-200 ${activePage === 'docker' ? 'w-11 h-11' : 'w-9 h-9'}`} />
+              <Cube size={18} weight="duotone" />
+              <span className="text-xs font-medium">{lang === 'vi' ? 'Quản lý Node' : 'Node'}</span>
             </button>
           </div>
 
-          <div className="mt-auto shrink-0 w-full flex flex-col items-center gap-2 pb-1">
+          <div className="shrink-0 w-full flex flex-col items-center gap-2 pb-1 px-2">
             <button
               onClick={() => navigateTo('settings')}
-              data-tip={t(lang, 'sidebar.settings')}
-              className="w-14 h-14 rounded-2xl flex items-center justify-center transition-all hover:scale-105"
+              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+              style={{
+                background: activePage === 'settings' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                color: activePage === 'settings' ? '#a78bfa' : labelColor,
+              }}
             >
-              <Gear size={28} weight="duotone" className={`transition-all duration-200 ${activePage === 'settings' ? 'w-11 h-11' : 'w-9 h-9'}`} />
+              <Gear size={18} weight="duotone" />
+              <span className="text-xs font-medium">{t(lang, 'sidebar.settings')}</span>
             </button>
 
-            <div className="w-[52px] h-px" style={{ background: borderColor }} />
+            <div className="w-full h-px" style={{ background: borderColor }} />
 
             <span className="text-[9px] font-mono leading-none whitespace-nowrap select-none" style={{ color: labelColor }}>
               {version ? `v${version}` : ''}
@@ -280,11 +317,11 @@ function AppContent() {
           </div>
         </nav>
 
-        <div className="absolute left-[72px] top-3 bottom-3 w-px" style={{ background: borderColor }} />
+        <div className="absolute left-[180px] top-3 bottom-3 w-px" style={{ background: borderColor }} />
 
-        <div className="flex-1 ml-[72px] overflow-hidden">
+        <div className="flex-1 ml-[180px] overflow-hidden">
           <div className={`h-full ${transitionClass}`}>
-            {displayPage === 'servers' && <HomePage theme={theme} lang={lang} />}
+            {displayPage === 'servers' && <HomePage theme={theme} lang={lang} onServerCreated={refreshSidebarServers} />}
             {displayPage === 'donate' && <DonatePage theme={theme} lang={lang} />}
             {displayPage === 'docker' && <NodePage theme={theme} lang={lang} />}
             {displayPage === 'settings' && <SettingsPage theme={theme} lang={lang} />}
