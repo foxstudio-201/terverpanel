@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
+  openFolderPicker: (defaultPath) => ipcRenderer.invoke('dialog:openFolder', defaultPath),
 
   register: (username, password) => ipcRenderer.invoke('auth:register', { username, password }),
   login: (username, password, rememberMe) => ipcRenderer.invoke('auth:login', { username, password, rememberMe }),
@@ -38,6 +39,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getEgg: (eggId) => ipcRenderer.invoke('eggs:get', eggId),
 
   getDockerStatus: () => ipcRenderer.invoke('stats:docker'),
+  getDatabaseStatus: () => ipcRenderer.invoke('stats:database'),
+  loadNodeConfigs: () => ipcRenderer.invoke('node:loadConfigs'),
   getPing: () => ipcRenderer.invoke('stats:ping'),
   getNetworkStats: () => ipcRenderer.invoke('stats:network'),
 
@@ -45,11 +48,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   installWings: () => ipcRenderer.invoke('wings:install'),
   startWings: () => ipcRenderer.invoke('wings:start'),
   stopWings: () => ipcRenderer.invoke('wings:stop'),
+  startDocker: () => ipcRenderer.invoke('docker:start'),
+  stopDocker: () => ipcRenderer.invoke('docker:stop'),
+  startCloudflared: () => ipcRenderer.invoke('cloudflared:start'),
+  stopCloudflared: () => ipcRenderer.invoke('cloudflared:stop'),
+  systemdStatus: (serviceName) => ipcRenderer.invoke('systemd:status', serviceName),
+  systemdStart: (serviceName) => ipcRenderer.invoke('systemd:start', serviceName),
+  systemdStop: (serviceName) => ipcRenderer.invoke('systemd:stop', serviceName),
+  systemdLogs: (serviceName, lines) => ipcRenderer.invoke('systemd:logs', serviceName, lines),
   generateWingsConfig: () => ipcRenderer.invoke('wings:config:generate'),
 
   checkCloudflared: () => ipcRenderer.invoke('cloudflare:check'),
   installCloudflared: (arch) => ipcRenderer.invoke('cloudflare:install', arch),
-  createTunnel: (tunnelName, token, appDomain) => ipcRenderer.invoke('cloudflare:tunnel:create', tunnelName, token, appDomain),
+  createTunnel: (tunnelName, appDomain) => ipcRenderer.invoke('cloudflare:tunnel:create', tunnelName, appDomain),
   installTunnelService: (token) => ipcRenderer.invoke('cloudflare:tunnel:install-service', token),
   cloudflaredLogin: () => ipcRenderer.invoke('cloudflare:tunnel:login'),
   cloudflaredCheckAuth: () => ipcRenderer.invoke('cloudflare:tunnel:check-auth'),
@@ -60,4 +71,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   systemCheckAuth: () => ipcRenderer.invoke('system:checkAuth'),
   systemCleanup: (type) => ipcRenderer.invoke('system:cleanup', type),
   databaseSetup: (dbName, dbUser, dbPass) => ipcRenderer.invoke('database:setup', dbName, dbUser, dbPass),
+  installDatabase: () => ipcRenderer.invoke('database:install'),
+
+  onInstallProgress: (callback) => ipcRenderer.on('install:progress', (_, data) => callback(data)),
 })

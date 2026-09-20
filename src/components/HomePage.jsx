@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { t } from '../i18n/translations'
+import { Cpu, Memory, HardDrive } from '@phosphor-icons/react'
 import VariableContainer from './VariableContainer'
 import VersionChooser from './VersionChooser'
 import LoaderChooser from './LoaderChooser'
@@ -608,16 +609,6 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart }) {
   const serverIp = '127.0.0.1'
   const serverPort = '25565'
 
-  const RamIcon = () => (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 3v18M18 3v18M6 9h12M6 15h12M3 6h3M3 12h3M3 18h3M18 6h3M18 12h3M18 18h3" /></svg>
-  )
-  const CpuIcon = () => (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5M4.5 15.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25z" /></svg>
-  )
-  const DiskIcon = () => (
-    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>
-  )
-
   return (
     <div
       className="rounded-2xl overflow-hidden relative transition-all hover:scale-[1.01]"
@@ -699,24 +690,24 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart }) {
         {/* RAM, CPU, Disk */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1.5">
-            <div style={{ color: '#a78bfa' }}><RamIcon /></div>
+            <Memory size={16} weight="duotone" style={{ color: '#a78bfa' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>RAM</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.memory || 0}MB</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{server.resources?.memory || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>MB</span></p>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
-            <div style={{ color: '#3b82f6' }}><CpuIcon /></div>
+            <Cpu size={16} weight="duotone" style={{ color: '#3b82f6' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>CPU</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.cpuPercent || 0}%</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{server.resources?.cpuPercent || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>%</span></p>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
-            <div style={{ color: '#22c55e' }}><DiskIcon /></div>
+            <HardDrive size={16} weight="duotone" style={{ color: '#22c55e' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>Disk</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>{server.resources?.disk || 0}MB</p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{(server.resources?.disk || 0) >= 1024 ? Math.round((server.resources.disk / 1024) * 10) / 10 : server.resources?.disk || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>{(server.resources?.disk || 0) >= 1024 ? 'GB' : 'MB'}</span></p>
             </div>
           </div>
         </div>
