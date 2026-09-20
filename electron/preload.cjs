@@ -73,5 +73,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   databaseSetup: (dbName, dbUser, dbPass) => ipcRenderer.invoke('database:setup', dbName, dbUser, dbPass),
   installDatabase: () => ipcRenderer.invoke('database:install'),
 
+  // Wings local API proxy
+  wingsServerState: (uuid) => ipcRenderer.invoke('wings:server:state', uuid),
+  wingsServerPower: (uuid, action) => ipcRenderer.invoke('wings:server:power', uuid, action),
+  wingsServerCommand: (uuid, command) => ipcRenderer.invoke('wings:server:command', uuid, command),
+  wingsServerLogs: (uuid) => ipcRenderer.invoke('wings:server:logs', uuid),
+  wingsListFiles: (uuid, dir) => ipcRenderer.invoke('wings:server:files', uuid, dir),
+  wingsReadFile: (uuid, path) => ipcRenderer.invoke('wings:server:readFile', uuid, path),
+  wingsWriteFile: (uuid, path, content) => ipcRenderer.invoke('wings:server:writeFile', uuid, path, content),
+  wingsDeleteFile: (uuid, path) => ipcRenderer.invoke('wings:server:deleteFile', uuid, path),
+  wingsSyncConfig: (uuid, config) => ipcRenderer.invoke('wings:server:sync', uuid, config),
+  wingsReinstall: (uuid) => ipcRenderer.invoke('wings:server:reinstall', uuid),
+  wingsDeleteServer: (uuid) => ipcRenderer.invoke('wings:server:delete', uuid),
+  wingsCreateServer: (uuid) => ipcRenderer.invoke('wings:server:create', uuid),
+  wingsListServers: () => ipcRenderer.invoke('wings:servers:list'),
+
   onInstallProgress: (callback) => ipcRenderer.on('install:progress', (_, data) => callback(data)),
 })

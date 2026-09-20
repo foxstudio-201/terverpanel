@@ -2254,4 +2254,136 @@ app.whenReady().then(() => {
   }, 2000)
 })
 
+// ─── Wings Local API Proxy ──────────────────────────────────────────
+function getWingsLocalToken() {
+  try {
+    const tokenStorePath = path.join(app.getPath('userData'), '.wings-api-token')
+    if (fs.existsSync(tokenStorePath)) {
+      return JSON.parse(fs.readFileSync(tokenStorePath, 'utf8'))
+    }
+  } catch {}
+  return null
+}
+
+async function wingsApiCall(method, endpoint, body) {
+  const tokenData = getWingsLocalToken()
+  const tokenId = tokenData?.tokenId || '1'
+  const token = tokenData?.token || ''
+  const url = `http://127.0.0.1:8080${endpoint}`
+  const headers = {
+    'Authorization': `Bearer ${tokenId}.${token}`,
+    'Content-Type': 'application/json',
+    'Accept': 'application/vnd.pterodactyl.v1+json',
+  }
+  const opts = { method, headers, timeout: 15000 }
+  if (body && method !== 'GET') opts.body = JSON.stringify(body)
+  const resp = await fetch(url, opts)
+  const text = await resp.text()
+  try { return JSON.parse(text) } catch { return { raw: text } }
+}
+
+ipcMain.handle('wings:server:state', async (e, uuid) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${uuid}`)
+    return { ok: true, state: data?.attributes?.state || 'stopped' }
+  } catch { return { ok: false, state: 'offline' } }
+})
+
+ipcMain.handle('wings:server:power', async (e, uuid, action) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${uuid}/power`, { action, wait_seconds: 0 })
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:command', async (e, uuid, command) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${uuid}/commands`, { commands: [command] })
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:logs', async (e, uuid) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${uuid}/logs`)
+    return { ok: true, logs: data?.logs || data?.data || '' }
+  } catch { return { ok: true, logs: '' } }
+})
+
+ipcMain.handle('wings:server:files', async (e, uuid, dirPath) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${uuid}/files/list?directory=${encodeURIComponent(dirPath || '/')}`)
+    return { ok: true, files: data?.data || data || [] }
+  } catch { return { ok: true, files: [] } }
+})
+
+ipcMain.handle('wings:server:readFile', async (e, uuid, filePath) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${uuid}/files/read?file=${encodeURIComponent(filePath)}`)
+    return { ok: true, content: data?.content || data?.data || '' }
+  } catch { return { ok: false, content: '' } }
+})
+
+ipcMain.handle('wings:server:writeFile', async (e, uuid, filePath, content) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${uuid}/files/write?file=${encodeURIComponent(filePath)}`, content)
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:deleteFile', async (e, uuid, filePath) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('DELETE', `/api/servers/${uuid}/files/delete?files[]=${encodeURIComponent(filePath)}`)
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:sync', async (e, uuid, config) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${uuid}/sync`, config)
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:reinstall', async (e, uuid) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${uuid}/reinstall`)
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:delete', async (e, uuid) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('DELETE', `/api/servers/${uuid}`)
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:create', async (e, uuid) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('POST', '/api/servers', { uuid, start_on_completion: false, skip_scripts: false })
+    return { ok: true, data }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:servers:list', async (e) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const data = await wingsApiCall('GET', '/api/servers')
+    return { ok: true, servers: data?.data || data || [] }
+  } catch { return { ok: true, servers: [] } }
+})
+
 app.on('window-all-closed', () => {})

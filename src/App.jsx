@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AppProvider, useApp } from './i18n/AppContext'
 import { t } from './i18n/translations'
-import { House, Gear, Heart, Cube, List } from '@phosphor-icons/react'
+import { House, Gear, Heart, Cube, List, Terminal, Files, Database, Clock, Users, Archive, Network, Play, GearSix, ArrowLeft } from '@phosphor-icons/react'
 import TitleBar from './components/TitleBar'
 import CloseModal from './components/CloseModal'
 import TooltipProvider from './components/ui/TooltipProvider'
@@ -10,6 +10,7 @@ import LoginPage from './components/LoginPage'
 import HomePage from './components/HomePage'
 import DonatePage from './components/DonatePage'
 import SettingsPage from './components/SettingsPage'
+import ServerPanel from './components/server/ServerPanel'
 
 function Spinner({ theme, lang, text }) {
   const textColor = theme === 'light' ? '#111' : '#fff'
@@ -23,6 +24,18 @@ function Spinner({ theme, lang, text }) {
     </div>
   )
 }
+
+const SERVER_PANEL_PAGES = [
+  { key: 'server-console', icon: Terminal, label: 'Console', labelVi: 'Bảng điều khiển' },
+  { key: 'server-files', icon: Files, label: 'Files', labelVi: 'Tệp tin' },
+  { key: 'server-databases', icon: Database, label: 'Databases', labelVi: 'Cơ sở dữ liệu' },
+  { key: 'server-schedules', icon: Clock, label: 'Schedules', labelVi: 'Lịch trình' },
+  { key: 'server-users', icon: Users, label: 'Users', labelVi: 'Người dùng' },
+  { key: 'server-backups', icon: Archive, label: 'Backups', labelVi: 'Sao lưu' },
+  { key: 'server-network', icon: Network, label: 'Network', labelVi: 'Mạng' },
+  { key: 'server-startup', icon: Play, label: 'Startup', labelVi: 'Khởi động' },
+  { key: 'server-settings', icon: GearSix, label: 'Settings', labelVi: 'Cài đặt' },
+]
 
 function AppContent() {
   const { lang, theme } = useApp()
@@ -124,6 +137,17 @@ function AppContent() {
     }, 200)
   }
 
+  const handleSelectServer = (srv) => {
+    setSelectedSidebarServer(srv)
+    setShowServerDropdown(false)
+    navigateTo('server-console')
+  }
+
+  const handleBackFromServer = () => {
+    setSelectedSidebarServer(null)
+    navigateTo('servers')
+  }
+
   const handleLogin = (data) => {
     setPhase('fading-out')
     setTimeout(() => {
@@ -146,6 +170,7 @@ function AppContent() {
       }
       setSession(null)
       setDisplaySession(null)
+      setSelectedSidebarServer(null)
       setActivePage('servers')
       setDisplayPage('servers')
       setSavedCredentials({ savedUsername: '', savedPassword: '', rememberMe: false })
@@ -191,6 +216,9 @@ function AppContent() {
         </div>
       )
     }
+
+    const isInServerPanel = displayPage.startsWith('server-')
+
     return (
       <div className="flex flex-1 overflow-hidden relative pt-11">
         <nav className="absolute left-0 top-11 bottom-0 z-50 w-[180px] flex flex-col py-3" style={{ background: theme === 'light' ? '#fafafa' : '#0d0d0d', borderRight: `1px solid ${borderColor}` }}>
@@ -247,7 +275,7 @@ function AppContent() {
                             return (
                               <button
                                 key={srv.id || i}
-                                onClick={() => { setSelectedSidebarServer(srv); setShowServerDropdown(false); navigateTo('servers') }}
+                                onClick={() => handleSelectServer(srv)}
                                 className="w-full px-3 py-2.5 flex items-center gap-2.5 transition-colors"
                                 style={{ background: isSelected ? 'rgba(167,139,250,0.1)' : undefined }}
                               >
@@ -272,44 +300,78 @@ function AppContent() {
               </div>
             )}
 
-            {/* Home */}
-            <button
-              onClick={() => navigateTo('servers')}
-              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
-              style={{
-                background: activePage === 'servers' ? 'rgba(167,139,250,0.12)' : 'transparent',
-                color: activePage === 'servers' ? '#a78bfa' : labelColor,
-              }}
-            >
-              <House size={18} weight="duotone" />
-              <span className="text-xs font-medium">{t(lang, 'sidebar.home')}</span>
-            </button>
+            {/* Server panel nav OR normal nav */}
+            {selectedSidebarServer ? (
+              <>
+                <button
+                  onClick={handleBackFromServer}
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  style={{ color: labelColor }}
+                >
+                  <ArrowLeft size={18} weight="duotone" />
+                  <span className="text-xs font-medium">{t(lang, 'sidebar.home')}</span>
+                </button>
 
-            {/* Donate */}
-            <button
-              onClick={() => navigateTo('donate')}
-              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
-              style={{
-                background: activePage === 'donate' ? 'rgba(167,139,250,0.12)' : 'transparent',
-                color: activePage === 'donate' ? '#a78bfa' : labelColor,
-              }}
-            >
-              <Heart size={18} weight="duotone" />
-              <span className="text-xs font-medium">{t(lang, 'home.donate')}</span>
-            </button>
+                <div className="w-full h-px my-1" style={{ background: borderColor }} />
 
-            {/* Node */}
-            <button
-              onClick={() => navigateTo('docker')}
-              className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
-              style={{
-                background: activePage === 'docker' ? 'rgba(167,139,250,0.12)' : 'transparent',
-                color: activePage === 'docker' ? '#a78bfa' : labelColor,
-              }}
-            >
-              <Cube size={18} weight="duotone" />
-              <span className="text-xs font-medium">{lang === 'vi' ? 'Quản lý Node' : 'Node'}</span>
-            </button>
+                {SERVER_PANEL_PAGES.map(p => {
+                  const Icon = p.icon
+                  const isActive = displayPage === p.key
+                  return (
+                    <button
+                      key={p.key}
+                      onClick={() => navigateTo(p.key)}
+                      className="w-full h-9 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                      style={{
+                        background: isActive ? 'rgba(167,139,250,0.12)' : 'transparent',
+                        color: isActive ? '#a78bfa' : labelColor,
+                      }}
+                    >
+                      <Icon size={16} weight="duotone" />
+                      <span className="text-[11px] font-medium">{lang === 'vi' ? p.labelVi : p.label}</span>
+                    </button>
+                  )
+                })}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => navigateTo('servers')}
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  style={{
+                    background: activePage === 'servers' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                    color: activePage === 'servers' ? '#a78bfa' : labelColor,
+                  }}
+                >
+                  <House size={18} weight="duotone" />
+                  <span className="text-xs font-medium">{t(lang, 'sidebar.home')}</span>
+                </button>
+
+                <button
+                  onClick={() => navigateTo('donate')}
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  style={{
+                    background: activePage === 'donate' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                    color: activePage === 'donate' ? '#a78bfa' : labelColor,
+                  }}
+                >
+                  <Heart size={18} weight="duotone" />
+                  <span className="text-xs font-medium">{t(lang, 'home.donate')}</span>
+                </button>
+
+                <button
+                  onClick={() => navigateTo('docker')}
+                  className="w-full h-10 shrink-0 rounded-xl flex items-center gap-2.5 px-3 transition-all text-left"
+                  style={{
+                    background: activePage === 'docker' ? 'rgba(167,139,250,0.12)' : 'transparent',
+                    color: activePage === 'docker' ? '#a78bfa' : labelColor,
+                  }}
+                >
+                  <Cube size={18} weight="duotone" />
+                  <span className="text-xs font-medium">{lang === 'vi' ? 'Quản lý Node' : 'Node'}</span>
+                </button>
+              </>
+            )}
           </div>
 
           <div className="shrink-0 w-full flex flex-col items-center gap-2 pb-1 px-2">
@@ -341,6 +403,9 @@ function AppContent() {
             {displayPage === 'donate' && <DonatePage theme={theme} lang={lang} />}
             {displayPage === 'docker' && <NodePage theme={theme} lang={lang} />}
             {displayPage === 'settings' && <SettingsPage theme={theme} lang={lang} />}
+            {isInServerPanel && selectedSidebarServer && (
+              <ServerPanel server={selectedSidebarServer} theme={theme} lang={lang} displayPage={displayPage} onBack={handleBackFromServer} onServerDeleted={refreshSidebarServers} />
+            )}
           </div>
         </div>
 
