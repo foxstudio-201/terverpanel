@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { t } from '../i18n/translations'
 import { Cpu, Memory, HardDrive, DesktopTower, Info } from '@phosphor-icons/react'
 
@@ -130,6 +130,7 @@ function NodePage({ theme, lang }) {
   const isElectron = typeof window !== 'undefined' && window.electronAPI
 
   const [tab, setTab] = useState('status')
+  const statusRef = useRef({ docker: null, wings: null, cloudflare: null })
   const [docker, setDocker] = useState(null)
   const [dockerInstalling, setDockerInstalling] = useState(false)
   const [dockerUninstalling, setDockerUninstalling] = useState(false)
@@ -262,14 +263,20 @@ function NodePage({ theme, lang }) {
     const logInterval = setInterval(async () => {
       if (!window.electronAPI?.systemdLogs) return
       try {
+        const dInst = statusRef.current.docker?.installed
+        const wInst = statusRef.current.wings?.installed
+        const cInst = statusRef.current.cloudflare?.installed
         const [d, w, c] = await Promise.all([
-          window.electronAPI.systemdLogs('docker', 60),
-          window.electronAPI.systemdLogs('lunarspace-wings', 60),
-          window.electronAPI.systemdLogs('cloudflared', 60),
+          dInst ? window.electronAPI.systemdLogs('docker', 60) : Promise.resolve(null),
+          wInst ? window.electronAPI.systemdLogs('lunarspace-wings', 60) : Promise.resolve(null),
+          cInst ? window.electronAPI.systemdLogs('cloudflared', 60) : Promise.resolve(null),
         ])
         if (d?.ok && d.logs) setDockerLog(d.logs)
+        else if (!dInst) setDockerLog('')
         if (w?.ok && w.logs) setWingsLog(w.logs)
+        else if (!wInst) setWingsLog('')
         if (c?.ok && c.logs) setCfLog(c.logs)
+        else if (!cInst) setCfLog('')
       } catch {}
     }, 2000)
     if (window.electronAPI.onInstallProgress) {
@@ -319,10 +326,10 @@ function NodePage({ theme, lang }) {
         window.electronAPI.checkCloudflared(),
         window.electronAPI.getDatabaseStatus(),
       ])
-      if (d?.ok !== false) setDocker(d)
-      if (w?.ok) setWings(w)
+      if (d?.ok !== false) { setDocker(d); statusRef.current.docker = d }
+      if (w?.ok) { setWings(w); statusRef.current.wings = w }
       if (info?.ok) setSysInfo(info)
-      if (cf?.ok) setCloudflare(cf)
+      if (cf?.ok) { setCloudflare(cf); statusRef.current.cloudflare = cf }
       if (db?.ok) setDatabase(db)
     } catch {}
   }
@@ -343,6 +350,7 @@ function NodePage({ theme, lang }) {
     setDockerInstalling(true); setDockerLog(''); setDockerProgress({ percent: 0, message: 'Đang bắt đầu...' })
     const res = await window.electronAPI.installDocker()
     if (res?.ok) { setDockerLog('[OK] ' + (lang === 'vi' ? 'Cài Docker thành công!' : 'Docker installed!') + '\n' + (res.version || '')); refreshAll(); addToast(lang === 'vi' ? 'Docker đã cài xong!' : 'Docker installed!', 'ok') }
+    else if (res?.needAuth) { setDockerLog('[LỖI] ' + (lang === 'vi' ? 'Cần quyền root. Hãy xác thực sudo trước.' : 'Needs root. Authenticate sudo first.')); setAuthOpen(true) }
     else { setDockerLog('[LỖI] ' + (res?.error || '')); addToast(lang === 'vi' ? 'Cài Docker thất bại' : 'Docker install failed', 'error') }
     setDockerInstalling(false); setDockerProgress(null)
   }
@@ -471,6 +479,7 @@ function NodePage({ theme, lang }) {
     setWizardProcessing(true); setWizardDockerLog('[INFO] ' + (lang === 'vi' ? 'Đang cài Docker...' : 'Installing Docker...'))
     const res = await window.electronAPI.installDocker()
     if (res?.ok) { setWizardDockerLog(prev => prev + '\n[OK] ' + (lang === 'vi' ? 'Cài thành công!' : 'Installed!')); setTimeout(() => { setWizardStep(2); setWizardProcessing(false) }, 1000) }
+    else if (res?.needAuth) { setWizardDockerLog(prev => prev + '\n[LỖI] ' + (lang === 'vi' ? 'Cần quyền root. Hãy xác thực sudo trước.' : 'Needs root. Authenticate sudo first.')); setWizardProcessing(false); setAuthOpen(true) }
     else { setWizardDockerLog(prev => prev + '\n[LỖI] ' + (res?.error || '')); setWizardProcessing(false) }
   }
   const handleWizardWingsInstall = async () => {
@@ -532,8 +541,9 @@ function NodePage({ theme, lang }) {
     if (res?.ok) {
       setWizardDockerLog(prev => prev + '\n[OK] ' + (lang === 'vi' ? `Docker cài thành công! (${dockerTime}s, ${res.version || ''})` : `Docker installed! (${dockerTime}s, ${res.version || ''})`))
     } else {
-      setWizardDockerLog(prev => prev + '\n[LỖI] ' + (res?.error || 'Unknown error'))
+      setWizardDockerLog(prev => prev + '\n[LỖI] ' + (res?.needAuth ? (lang === 'vi' ? 'Cần quyền root. Hãy xác thực sudo trước.' : 'Needs root. Authenticate sudo first.') : (res?.error || 'Unknown error')))
       setWizardProcessing(false)
+      if (res?.needAuth) setAuthOpen(true)
       return
     }
     await refreshAll()
@@ -709,7 +719,7 @@ function NodePage({ theme, lang }) {
               setDockerLog('[INFO] ' + (lang === 'vi' ? 'Đang khởi động Docker...' : 'Starting Docker...'))
               const res = await window.electronAPI.systemdStart('docker')
               if (res?.ok) { setDockerLog(res.logs || '[OK] Docker đã chạy!'); addToast(lang === 'vi' ? 'Docker đã khởi động!' : 'Docker started!', 'ok') }
-              else { setDockerLog(res?.logs || '[LỖI] ' + (res?.error || '')); addToast(lang === 'vi' ? 'Khởi động Docker thất bại' : 'Docker start failed', 'error') }
+              else { const errText = res?.error || res?.startOutput || res?.logs || ''; setDockerLog(errText ? '[LỖI] ' + errText : '[LỖI] Không khởi động được Docker'); addToast(lang === 'vi' ? 'Khởi động Docker thất bại' : 'Docker start failed', 'error') }
               setTimeout(refreshAll, 2000)
             }} onStop={async () => {
               setDockerLog('[INFO] ' + (lang === 'vi' ? 'Đang dừng Docker...' : 'Stopping Docker...'))
@@ -723,7 +733,7 @@ function NodePage({ theme, lang }) {
               setWingsLog('[INFO] ' + (lang === 'vi' ? 'Đang khởi động Wings...' : 'Starting Wings...'))
               const res = await window.electronAPI.systemdStart('lunarspace-wings')
               if (res?.ok) { setWingsLog(res.logs || '[OK] Wings đã chạy!'); addToast(lang === 'vi' ? 'Wings đã khởi động!' : 'Wings started!', 'ok') }
-              else { setWingsLog(res?.logs || '[LỖI] ' + (res?.error || '')); addToast(lang === 'vi' ? 'Khởi động Wings thất bại' : 'Wings start failed', 'error') }
+              else { const errText = res?.error || res?.startOutput || res?.logs || ''; setWingsLog(errText ? '[LỖI] ' + errText : '[LỖI] Không khởi động được Wings'); addToast(lang === 'vi' ? 'Khởi động Wings thất bại: ' + (res?.error || res?.startOutput || '').slice(0, 80) : 'Wings start failed', 'error') }
               setTimeout(refreshAll, 2000)
             }} onStop={async () => {
               setWingsLog('[INFO] ' + (lang === 'vi' ? 'Đang dừng Wings...' : 'Stopping Wings...'))
@@ -744,7 +754,7 @@ function NodePage({ theme, lang }) {
               setCfLog('[INFO] ' + (lang === 'vi' ? 'Đang khởi động Cloudflared...' : 'Starting Cloudflared...'))
               const res = await window.electronAPI.systemdStart('cloudflared')
               if (res?.ok) { setCfLog(res.logs || '[OK] Cloudflared đã chạy!'); addToast(lang === 'vi' ? 'Cloudflared đã khởi động!' : 'Cloudflared started!', 'ok') }
-              else { setCfLog(res?.logs || '[LỖI] ' + (res?.error || '')); addToast(lang === 'vi' ? 'Khởi động Cloudflared thất bại' : 'Cloudflared start failed', 'error') }
+              else { const errText = res?.error || res?.startOutput || res?.logs || ''; setCfLog(errText ? '[LỖI] ' + errText : '[LỖI] Không khởi động được Cloudflared'); addToast(lang === 'vi' ? 'Khởi động Cloudflared thất bại' : 'Cloudflared start failed', 'error') }
               setTimeout(refreshAll, 2000)
             }} onStop={async () => {
               setCfLog('[INFO] ' + (lang === 'vi' ? 'Đang dừng Cloudflared...' : 'Stopping Cloudflared...'))

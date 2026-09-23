@@ -108,8 +108,7 @@ function sanitizeSettings(input) {
 }
 
 function getDefaultPaths() {
-  const home = os.homedir()
-  const base = `${home}/.terverpanel`
+  const base = path.join(app.getPath('appData'), '.TerverPanel')
   return {
     base,
     docker: `${base}/docker`,
@@ -126,8 +125,12 @@ function getDefaultPaths() {
 function readSettings() {
   const db = readDB()
   const settings = sanitizeSettings(db.settings || {})
+  const defaults = getDefaultPaths()
   if (!settings.paths || !settings.paths.base) {
-    settings.paths = getDefaultPaths()
+    settings.paths = defaults
+  } else if (settings.paths.base === path.join(os.homedir(), '.terverpanel')) {
+    settings.paths = defaults
+    try { db.settings = settings; writeDB(db) } catch {}
   }
   return settings
 }
@@ -923,7 +926,7 @@ ipcMain.handle('server:removeConfig', (e, id) => {
       fs.rmSync(serverDir, { recursive: true, force: true })
     } catch {
       try {
-        const dockerBin = '/home/neo/.config/.TerverPanel/docker/bin/docker'
+        const dockerBin = path.join((readSettings().paths?.docker || getDefaultPaths().docker).replace(/^~/, os.homedir()), 'bin', 'docker')
         spawnSync(dockerBin, ['run', '--rm', '-v', `${path.dirname(serverDir)}:/mnt/servers`, 'alpine', 'rm', '-rf', `/mnt/servers/${id}`], { timeout: 15000 })
       } catch {}
       if (fs.existsSync(serverDir)) {
@@ -1143,7 +1146,7 @@ ipcMain.handle('server:install', async (e, serverId) => {
       sendServerLog(server.id, `[Install] Server directory: ${serverDir}`)
     }
 
-    const dockerBin = '/home/neo/.config/.TerverPanel/docker/bin/docker'
+    const dockerBin = path.join((readSettings().paths?.docker || getDefaultPaths().docker).replace(/^~/, os.homedir()), 'bin', 'docker')
     const uid = os.userInfo().uid
     const gid = os.userInfo().gid
     try {
@@ -2037,6 +2040,7 @@ ipcMain.handle('docker:install', async (e) => {
     const paths = settings.paths || {}
     const dockerDir = (paths.docker || '').replace(/^~/, os.homedir())
     if (!dockerDir) return { ok: false, error: 'Chưa chọn đường dẫn Docker. Hãy Setup trước.' }
+    if (!cachedSudoPassword) return { ok: false, error: 'sudo_not_authenticated', needAuth: true }
 
     const binDir = `${dockerDir}/bin`
     const dataDir = `${dockerDir}/data`
@@ -2168,7 +2172,13 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 `
-    fs.writeFileSync('/etc/systemd/system/terver-containerd.service', containerdService)
+    const containerdTmp = path.join(os.tmpdir(), 'terver-containerd.service')
+    fs.writeFileSync(containerdTmp, containerdService)
+    const installContainerd = sudoExec(`install -m 644 '${containerdTmp}' /etc/systemd/system/terver-containerd.service`)
+    if (!installContainerd.ok) {
+      sendProgress('docker', 0, `Lỗi ghi terver-containerd.service: ${installContainerd.error}`)
+      return { ok: false, error: `Không ghi được terver-containerd.service: ${installContainerd.error}`, needAuth: installContainerd.error === 'sudo_not_authenticated' }
+    }
 
     sendProgress('docker', 75, 'Đang tạo docker service...')
     const serviceContent = `[Unit]
@@ -2190,7 +2200,13 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 `
-    fs.writeFileSync('/etc/systemd/system/terver-docker.service', serviceContent)
+    const dockerSvcTmp = path.join(os.tmpdir(), 'terver-docker.service')
+    fs.writeFileSync(dockerSvcTmp, serviceContent)
+    const installDockerSvc = sudoExec(`install -m 644 '${dockerSvcTmp}' /etc/systemd/system/terver-docker.service`)
+    if (!installDockerSvc.ok) {
+      sendProgress('docker', 0, `Lỗi ghi terver-docker.service: ${installDockerSvc.error}`)
+      return { ok: false, error: `Không ghi được terver-docker.service: ${installDockerSvc.error}`, needAuth: installDockerSvc.error === 'sudo_not_authenticated' }
+    }
     sudoExec('systemctl daemon-reload')
 
     sendProgress('docker', 82, 'Đang enable + start containerd...')
@@ -2495,7 +2511,8 @@ ipcMain.handle('wings:install', async (e) => {
     const configPath = `${wingsConfigDir}/config.yml`
 
     sendProgress('wings', 2, 'Dừng Wings process...')
-    stopWingsProcess()
+    sudoExec('systemctl stop lunarspace-wings 2>/dev/null || true')
+    try { execSync('killall -9 wings 2>/dev/null || true', { timeout: 5000 }) } catch {}
 
     if (fs2.existsSync(binaryPath)) {
       sendProgress('wings', 3, 'Xóa binary cũ...')
@@ -2610,6 +2627,36 @@ ipcMain.handle('wings:install', async (e) => {
       const versionOut = execSync(`${binaryPath} --version 2>&1 || true`, { timeout: 5000, encoding: 'utf8' })
       const versionMatch = versionOut.match(/(\d+\.\d+\.\d+)/)
 
+      sendProgress('wings', 90, 'Tạo systemd service...')
+      const wingsService = `[Unit]
+Description=LunarSpace Wings Daemon
+After=network.target docker.service docker.socket
+Wants=docker.socket
+
+[Service]
+User=root
+KillMode=process
+LimitNOFILE=4096
+PIDFile=/run/lunarspace-wings/daemon.pid
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do [ -S /run/docker.sock ] && exit 0; sleep 1; done; echo "Docker socket not ready"; exit 1'
+ExecStart=${binaryPath} --config ${configPath}
+Restart=on-failure
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+`
+      const svcTmp = path.join(os.tmpdir(), 'lunarspace-wings.service')
+      fs2.writeFileSync(svcTmp, wingsService)
+      const installSvc = sudoExec(`install -m 644 '${svcTmp}' /etc/systemd/system/lunarspace-wings.service`)
+      if (!installSvc.ok) {
+        resolve({ ok: false, error: `Không ghi được lunarspace-wings.service: ${installSvc.error}`, needAuth: installSvc.error === 'sudo_not_authenticated' })
+        return
+      }
+      sudoExec('systemctl daemon-reload')
+
       sendProgress('wings', 100, `Cài thành công Wings ${versionMatch ? versionMatch[1] : 'unknown'} (${arch})`)
       resolve({ ok: true, version: versionMatch ? versionMatch[1] : 'unknown', arch })
     } catch (err) {
@@ -2625,7 +2672,19 @@ ipcMain.handle('wings:install', async (e) => {
 ipcMain.handle('wings:start', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    sudoExec('systemctl start lunarspace-wings')
+    const fs2 = require('fs')
+    if (!fs2.existsSync('/etc/systemd/system/lunarspace-wings.service')) {
+      return { ok: false, error: 'Unit lunarspace-wings.service chưa được tạo. Hãy cài lại Wings.' }
+    }
+    const r = sudoExec('systemctl start lunarspace-wings 2>&1')
+    if (!r.ok) return { ok: false, error: r.error || 'systemctl start failed' }
+    let status = ''
+    try { status = require('child_process').execSync('systemctl is-active lunarspace-wings 2>/dev/null', { timeout: 5000, encoding: 'utf8' }).trim() } catch {}
+    if (status !== 'active') {
+      let out = ''
+      try { out = require('child_process').execSync('journalctl -u lunarspace-wings -n 30 --no-pager 2>/dev/null', { timeout: 5000, encoding: 'utf8' }).trim() } catch {}
+      return { ok: false, error: `Wings không active (${status || 'unknown'})`, logs: out }
+    }
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -2671,13 +2730,29 @@ ipcMain.handle('systemd:start', async (e, serviceName) => {
     if (serviceName === 'docker') {
       try { execSync('systemctl list-unit-files terver-docker.service 2>/dev/null | grep terver-docker', { encoding: 'utf8' }); actualName = 'terver-docker' } catch {}
     }
+    let unitMissing = false
+    try {
+      if (!fs2.existsSync(`/etc/systemd/system/${actualName}.service`)) {
+        const listed = execSync(`systemctl list-unit-files ${actualName}.service 2>/dev/null || true`, { encoding: 'utf8' })
+        if (!listed.includes(`${actualName}.service`)) unitMissing = true
+      }
+    } catch {}
+    if (unitMissing) {
+      const hint = actualName.includes('wings') ? 'Hãy cài lại Wings trước.' : `Hãy cài lại ${actualName} trước.`
+      return { ok: false, status: 'not-found', logs: '', startOutput: '', error: `Unit ${actualName}.service chưa được tạo. ${hint}` }
+    }
     let startOutput = ''
-    try { startOutput = sudoExec(`systemctl start ${actualName} 2>&1`).output || '' } catch (err) { startOutput = err.message }
+    try {
+      const r = sudoExec(`systemctl start ${actualName} 2>&1`)
+      startOutput = (r.ok ? r.output : r.error) || ''
+    } catch (err) { startOutput = err.message }
     let newStatus = ''
     try { newStatus = execSync(`systemctl is-active ${actualName} 2>/dev/null`, { timeout: 5000, encoding: 'utf8' }).trim() } catch {}
     let logs = ''
     try { logs = execSync(`journalctl -u ${actualName} -n 80 --no-pager --output=short-iso 2>/dev/null`, { timeout: 8000, encoding: 'utf8' }).trim() } catch {}
-    return { ok: newStatus === 'active', status: newStatus, logs, startOutput }
+    const ok = newStatus === 'active'
+    const error = ok ? undefined : (startOutput.trim() || `Không khởi động được ${actualName} (status: ${newStatus || 'unknown'})`)
+    return { ok, status: newStatus, logs, startOutput, error }
   } catch (err) {
     return { ok: false, error: err.message }
   }
@@ -2716,6 +2791,12 @@ ipcMain.handle('systemd:logs', async (e, serviceName, lines = 80) => {
     if (serviceName === 'docker') {
       try { execSync('systemctl list-unit-files terver-docker.service 2>/dev/null | grep terver-docker', { encoding: 'utf8' }); actualName = 'terver-docker' } catch {}
     }
+    try {
+      const unitExists = execSync(`systemctl list-unit-files ${actualName}.service 2>/dev/null | grep -c ${actualName}`, { encoding: 'utf8' }).trim()
+      if (unitExists === '0' && !fs2.existsSync(`/etc/systemd/system/${actualName}.service`)) {
+        return { ok: true, logs: '' }
+      }
+    } catch {}
     let logs = ''
     try { logs = execSync(`journalctl -u ${actualName} -n ${lines} --no-pager --output=short-iso 2>/dev/null`, { timeout: 5000, encoding: 'utf8' }).trim() } catch {}
     return { ok: true, logs }
@@ -3418,6 +3499,7 @@ ipcMain.handle('system:cleanup', async (e, type) => {
         sudoExec(`rm -rf ${dockerDir}`)
       }
       sudoExec('rm -f /etc/systemd/system/terver-docker.service')
+      sudoExec('rm -f /etc/systemd/system/terver-containerd.service')
       sudoExec('systemctl daemon-reload 2>/dev/null || true')
       results.push('Docker: Đã gỡ xong')
       results.push('Docker: Đang gỡ package...')
@@ -3437,6 +3519,7 @@ ipcMain.handle('system:cleanup', async (e, type) => {
       if (wingsConfigDir) sudoExec(`rm -rf ${wingsConfigDir}`)
       sudoExec('rm -f /etc/systemd/system/lunarspace-wings.service')
       sudoExec('systemctl daemon-reload 2>/dev/null || true')
+      try { execSync(`journalctl -u lunarspace-wings --rotate 2>/dev/null; journalctl --vacuum-time=1s 2>/dev/null`, { timeout: 5000 }) } catch {}
       results.push('Wings: Đã xóa hoàn toàn')
     }
     if (type === 'cloudflare' || type === 'all') {
