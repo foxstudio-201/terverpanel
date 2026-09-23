@@ -409,6 +409,56 @@ function getSettings() {
 
 const WINGS_DATA_DIR = path.join(app.getPath('appData'), '.TerverPanel', 'wings', 'servers')
 
+function ensureWingsDataToUser() {
+  try {
+    const u = os.userInfo()
+    const wingsRoot = path.join(path.dirname(WINGS_DATA_DIR))
+    const r = sudoExec(`chown ${u.uid}:${u.gid} '${WINGS_DATA_DIR}' && chmod 755 '${WINGS_DATA_DIR}' && chown ${u.uid}:${u.gid} '${wingsRoot}' && chmod 755 '${wingsRoot}'`)
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
+function ensureWingsServersDir() {
+  try {
+    fs.mkdirSync(WINGS_DATA_DIR, { recursive: true, mode: 0o755 })
+    fs.accessSync(WINGS_DATA_DIR, fs.constants.W_OK)
+    return true
+  } catch {
+    try {
+      const u = os.userInfo()
+      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${WINGS_DATA_DIR}'`)
+      if (!r.ok) return false
+      fs.accessSync(WINGS_DATA_DIR, fs.constants.W_OK)
+      ensureWingsDataToUser()
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+function ensureServerDir(serverId) {
+  const dir = path.join(WINGS_DATA_DIR, serverId)
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 })
+    fs.accessSync(dir, fs.constants.W_OK)
+    return dir
+  } catch {
+    try {
+      if (!ensureWingsServersDir()) return null
+      const u = os.userInfo()
+      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${dir}' && chown -R ${u.uid}:${u.gid} '${dir}'`)
+      if (!r.ok) return null
+      fs.accessSync(dir, fs.constants.W_OK)
+      return dir
+    } catch {
+      return null
+    }
+  }
+}
+
 function resolveIconPath() {
   const devPath = path.join(__dirname, '../public/icon.ico')
   if (isDev && fs.existsSync(devPath)) return devPath
@@ -780,8 +830,8 @@ ipcMain.handle('server:getConfig', (e, serverId) => {
 
 function ensureEula(serverId) {
   try {
-    const dir = path.join(WINGS_DATA_DIR, serverId)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o755 })
+    const dir = ensureServerDir(serverId)
+    if (!dir) return false
     const p = path.join(dir, 'eula.txt')
     let needWrite = true
     if (fs.existsSync(p)) {
@@ -905,12 +955,15 @@ function runProc(cmd, args, opts = {}) {
 
 ipcMain.handle('server:addConfig', async (e, serverConfig) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const server = { id: generateUUID(), ...serverConfig, createdAt: new Date().toISOString() }
-  addServerConfig(server)
-  const serverDir = path.join(WINGS_DATA_DIR, server.id)
-  if (!fs.existsSync(serverDir)) {
-    fs.mkdirSync(serverDir, { recursive: true, mode: 0o755 })
+  if (!ensureWingsServersDir()) {
+    return { ok: false, error: `Không ghi được ${WINGS_DATA_DIR} (permission denied).` }
   }
+  const server = { id: generateUUID(), ...serverConfig, createdAt: new Date().toISOString() }
+  const serverDir = ensureServerDir(server.id)
+  if (!serverDir) {
+    return { ok: false, error: `Không tạo được thư mục server: EACCES ${path.join(WINGS_DATA_DIR, server.id)}` }
+  }
+  addServerConfig(server)
   ensureEula(server.id)
   ensureJava(server.id)
   syncServerToWings(server.id).catch(() => {})
@@ -1138,9 +1191,11 @@ ipcMain.handle('server:install', async (e, serverId) => {
   ensureWingsWs(server.id)
 
   try {
-    const serverDir = path.join(WINGS_DATA_DIR, server.id)
-    if (!fs.existsSync(serverDir)) {
-      fs.mkdirSync(serverDir, { recursive: true, mode: 0o755 })
+    const serverDir = ensureServerDir(server.id)
+    if (!serverDir) {
+      throw new Error(`Không ghi được ${path.join(WINGS_DATA_DIR, server.id)} (permission denied)`)
+    }
+    if (fs.existsSync(serverDir) && fs.readdirSync(serverDir).length === 0) {
       sendServerLog(server.id, `[Install] Created server directory: ${serverDir}`)
     } else {
       sendServerLog(server.id, `[Install] Server directory: ${serverDir}`)
@@ -1868,12 +1923,34 @@ ipcMain.handle('mc:getModpacks', async (e) => {
 })
 
 let cachedSudoPassword = null
+let passwordlessSudo = null
+
+function sudoHasPasswordless() {
+  if (passwordlessSudo !== null) return passwordlessSudo
+  try {
+    const { execSync } = require('child_process')
+    execSync('sudo -n true', { timeout: 5000, encoding: 'utf8' })
+    passwordlessSudo = true
+  } catch {
+    passwordlessSudo = false
+  }
+  return passwordlessSudo
+}
 
 function sudoExec(command, timeout = 30000) {
   const { execSync } = require('child_process')
+  const sh = `sh -c '${command.replace(/'/g, "'\\''")}'`
+  if (sudoHasPasswordless()) {
+    try {
+      const output = execSync(`sudo -n ${sh}`, { timeout, encoding: 'utf8' })
+      return { ok: true, output }
+    } catch (err) {
+      return { ok: false, error: (err.stdout || '') + (err.stderr || '') || err.message }
+    }
+  }
   if (cachedSudoPassword) {
     try {
-      const result = execSync(`echo '${cachedSudoPassword.replace(/'/g, "'\\''")}' | sudo -S sh -c '${command.replace(/'/g, "'\\''")}' 2>&1`, { timeout, encoding: 'utf8' })
+      const result = execSync(`echo '${cachedSudoPassword.replace(/'/g, "'\\''")}' | sudo -S ${sh} 2>&1`, { timeout, encoding: 'utf8' })
       return { ok: true, output: result }
     } catch (err) {
       if (err.message && err.message.includes('incorrect password')) {
@@ -1900,7 +1977,7 @@ ipcMain.handle('system:auth', async (e, password) => {
 
 ipcMain.handle('system:checkAuth', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  return { ok: true, authenticated: !!cachedSudoPassword }
+  return { ok: true, authenticated: !!cachedSudoPassword || sudoHasPasswordless() }
 })
 
 ipcMain.handle('system:getInfo', (e) => {
@@ -2040,7 +2117,7 @@ ipcMain.handle('docker:install', async (e) => {
     const paths = settings.paths || {}
     const dockerDir = (paths.docker || '').replace(/^~/, os.homedir())
     if (!dockerDir) return { ok: false, error: 'Chưa chọn đường dẫn Docker. Hãy Setup trước.' }
-    if (!cachedSudoPassword) return { ok: false, error: 'sudo_not_authenticated', needAuth: true }
+    if (!cachedSudoPassword && !sudoHasPasswordless()) return { ok: false, error: 'sudo_not_authenticated', needAuth: true }
 
     const binDir = `${dockerDir}/bin`
     const dataDir = `${dockerDir}/data`
@@ -2628,6 +2705,9 @@ ipcMain.handle('wings:install', async (e) => {
       const versionMatch = versionOut.match(/(\d+\.\d+\.\d+)/)
 
       sendProgress('wings', 90, 'Tạo systemd service...')
+      const wingsRoot = path.dirname(WINGS_DATA_DIR)
+      const installUid = os.userInfo().uid
+      const installGid = os.userInfo().gid
       const wingsService = `[Unit]
 Description=LunarSpace Wings Daemon
 After=network.target docker.service docker.socket
@@ -2640,6 +2720,7 @@ LimitNOFILE=4096
 PIDFile=/run/lunarspace-wings/daemon.pid
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do [ -S /run/docker.sock ] && exit 0; sleep 1; done; echo "Docker socket not ready"; exit 1'
 ExecStart=${binaryPath} --config ${configPath}
+ExecStartPost=/bin/bash -c 'chown -R ${installUid}:${installGid} "${wingsRoot}/servers" "${wingsRoot}/logs" 2>/dev/null || true; chmod 755 "${wingsRoot}/servers" 2>/dev/null || true'
 Restart=on-failure
 StartLimitInterval=180
 StartLimitBurst=30
