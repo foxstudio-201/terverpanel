@@ -218,7 +218,10 @@ function cleanServerHistoryOnDisk(serverId) {
 }
 
 const _serverTps = new Map()
+const _serverTpsSamples = new Map()
 const _tpsPollers = new Map()
+const TPS_MEAN_WINDOW_MS = 30000
+const TPS_MEAN_MAX_SAMPLES = 12
 
 function clampTps(n) {
   if (!Number.isFinite(n) || n < 0) return null
@@ -226,66 +229,121 @@ function clampTps(n) {
   return Math.round(n * 100) / 100
 }
 
-function parseTpsFromText(text) {
-  if (!text) return null
-  const t = String(text)
+function meanTps(samples) {
+  if (!samples.length) return null
+  let sum = 0
+  for (const s of samples) sum += s.v
+  return Math.round((sum / samples.length) * 100) / 100
+}
 
+function pruneTpsSamples(list, now = Date.now()) {
+  const cutoff = now - TPS_MEAN_WINDOW_MS
+  let i = 0
+  while (i < list.length && list[i].at < cutoff) i++
+  const kept = i > 0 ? list.slice(i) : list
+  return kept.length > TPS_MEAN_MAX_SAMPLES
+    ? kept.slice(kept.length - TPS_MEAN_MAX_SAMPLES)
+    : kept
+}
+
+function parseTpsSamplesFromText(text) {
+  if (!text) return []
+  const t = String(text)
+  const out = []
+  const push = (n) => {
+    const v = clampTps(parseFloat(n))
+    if (v != null) out.push(v)
+  }
+
+  // Forge/NeoForge: prefer Overall line, else average all Mean TPS lines in this chunk
+  const overall = t.match(/Overall\s*:\s*[\s\S]*?Mean TPS:\s*([\d]+(?:\.[\d]+)?)/i)
+  if (overall) { push(overall[1]); return out }
+
+  const meanAll = t.match(/Mean TPS:\s*([\d]+(?:\.[\d]+)?)/gi)
+  if (meanAll && meanAll.length) {
+    let sum = 0
+    let n = 0
+    for (const hit of meanAll) {
+      const v = clampTps(parseFloat(String(hit).replace(/.*Mean TPS:\s*/i, '')))
+      if (v != null) { sum += v; n++ }
+    }
+    if (n) { out.push(clampTps(sum / n)); return out }
+  }
+
+  // Paper/Spigot/Purpur: TPS from last 1m, 5m, 15m: a, b, c
   let m = t.match(/TPS from last[\s\S]{0,300}?\*?\s*([\d]+(?:\.[\d]+)?)\s*,\s*([\d]+(?:\.[\d]+)?)\s*,\s*([\d]+(?:\.[\d]+)?)/i)
-  if (m) return clampTps(parseFloat(m[1]))
+  if (m) {
+    push(m[1]); push(m[2]); push(m[3])
+    return out
+  }
 
   m = t.match(/TPS from last[^:\n]*:\s*([\d]+(?:\.[\d]+)?)/i)
-  if (m) return clampTps(parseFloat(m[1]))
+  if (m) { push(m[1]); return out }
 
   m = t.match(/\bavg\s+TPS\s*[:=]?\s*([\d]+(?:\.[\d]+)?)/i)
-  if (m) return clampTps(parseFloat(m[1]))
+  if (m) { push(m[1]); return out }
 
-  m = t.match(/\bTPS\s*[:=]\s*([\d]+(?:\.[\d]+)?)/i)
-  if (m) return clampTps(parseFloat(m[1]))
+  m = t.match(/\b(?:current\s+)?TPS\s*[:=]\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) { push(m[1]); return out }
 
   m = t.match(/([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)/)
   if (m) {
     const a = parseFloat(m[1])
-    if (a >= 0 && a <= 20.5) return clampTps(a)
+    if (a >= 0 && a <= 20.5) { push(m[1]); push(m[2]); push(m[3]); return out }
   }
 
   m = t.match(/\bMSPT\s*[:=]?\s*([\d]+(?:\.[\d]+)?)/i)
   if (m) {
     const mspt = parseFloat(m[1])
-    if (mspt > 0 && mspt < 5000) return clampTps(1000 / mspt)
+    if (mspt > 0 && mspt < 5000) push(1000 / mspt)
   }
 
-  return null
+  return out
 }
 
-function setServerTps(serverId, tps) {
-  const v = clampTps(tps)
-  if (v == null) return false
+function setServerTps(serverId, samples) {
+  const list = Array.isArray(samples) ? samples : [samples]
+  const now = Date.now()
+  let buffer = _serverTpsSamples.get(serverId) || []
+  for (const raw of list) {
+    const v = clampTps(raw)
+    if (v == null) continue
+    buffer.push({ v, at: now })
+  }
+  if (!buffer.length) return false
+  buffer = pruneTpsSamples(buffer, now)
+  _serverTpsSamples.set(serverId, buffer)
+
+  const mean = meanTps(buffer)
+  if (mean == null) return false
   const prev = _serverTps.get(serverId)
-  if (prev && Math.abs(prev.tps - v) < 0.05 && Date.now() - prev.at < 15000) {
-    prev.at = Date.now()
+  if (prev && Math.abs(prev.tps - mean) < 0.05 && now - prev.at < 15000) {
+    prev.at = now
+    prev.samples = buffer.length
     return true
   }
-  _serverTps.set(serverId, { tps: v, at: Date.now() })
+  _serverTps.set(serverId, { tps: mean, at: now, samples: buffer.length })
   try {
     const server = getServerByUuid(serverId)
-    if (!server || Math.abs((server.lastTps || 0) - v) >= 0.05) {
-      updateServerConfig(serverId, { lastTps: v, lastTpsAt: Date.now() })
+    if (!server || Math.abs((server.lastTps || 0) - mean) >= 0.05) {
+      updateServerConfig(serverId, { lastTps: mean, lastTpsAt: now })
     }
   } catch {}
   if (mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.send('server:tps', { serverId, tps: v, at: Date.now() })
+    mainWindow.webContents.send('server:tps', { serverId, tps: mean, at: now, samples: buffer.length })
   }
   return true
 }
 
 function ingestTpsLine(serverId, line) {
   if (!line) return
-  const tps = parseTpsFromText(line)
-  if (tps != null) setServerTps(serverId, tps)
+  const samples = parseTpsSamplesFromText(line)
+  if (samples.length) setServerTps(serverId, samples)
 }
 
 function clearServerTps(serverId) {
   _serverTps.delete(serverId)
+  _serverTpsSamples.delete(serverId)
 }
 
 function stopTpsPoller(serverId) {
@@ -296,16 +354,37 @@ function stopTpsPoller(serverId) {
   }
 }
 
+function tpsCommandsForEgg(eggId) {
+  const id = String(eggId || '').toLowerCase()
+  const [game, egg] = id.split('/')
+  if (game !== 'minecraft') return []
+  switch (egg) {
+    case 'forge':
+    case 'neoforge':
+      return ['forge tps']
+    case 'paper':
+    case 'purpur':
+    case 'spigot':
+      return ['tps']
+    case 'fabric':
+    case 'vanilla':
+      return ['tick query', 'tps']
+    default:
+      return ['tps', 'tick query']
+  }
+}
+
 async function sendTpsProbe(serverId) {
-  const cmds = ['spark tps', 'tps']
+  const server = getServerByUuid(serverId)
+  const cmds = tpsCommandsForEgg(server?.eggId)
+  if (!cmds.length) return
   for (const cmd of cmds) {
     try {
-      const sent = sendWingsWs(serverId, 'send command', [cmd])
-      if (sent) return
+      if (sendWingsWs(serverId, 'send command', [cmd])) return
     } catch {}
   }
   try {
-    await wingsApiCall('POST', `/api/servers/${serverId}/commands`, { commands: ['spark tps'] })
+    await wingsApiCall('POST', `/api/servers/${serverId}/commands`, { commands: [cmds[0]] })
   } catch {}
 }
 
@@ -318,25 +397,6 @@ function startTpsPoller(serverId) {
 
 function stopTpsPollerFor(serverId) {
   stopTpsPoller(serverId)
-}
-
-async function ensureSparkPlugin(server) {
-  try {
-    const egg = String(server?.eggId || '').split('/').pop().toLowerCase()
-    if (!['paper', 'purpur', 'spigot'].includes(egg)) return false
-    const serverDir = path.join(WINGS_DATA_DIR, server.id)
-    const pluginsDir = path.join(serverDir, 'plugins')
-    const sparkPath = path.join(pluginsDir, 'spark.jar')
-    if (fs.existsSync(sparkPath) && fs.statSync(sparkPath).size > 1000) return true
-    fs.mkdirSync(pluginsDir, { recursive: true })
-    sendServerLog(server.id, '[TPS] Downloading Spark plugin for real TPS...')
-    await downloadFile('https://spark.lucko.me/download', sparkPath)
-    sendServerLog(server.id, '[TPS] Spark installed — TPS will appear after server starts')
-    return true
-  } catch (err) {
-    try { sendServerLog(server.id, `[TPS] Spark install failed: ${err.message}`) } catch {}
-    return false
-  }
 }
 
 function getSettings() {
@@ -1265,7 +1325,6 @@ ipcMain.handle('server:install', async (e, serverId) => {
     sendServerProgress(server.id, 100, 'Installation complete!')
     sendServerLog(server.id, '[Install] Installation complete! Server is ready to start.')
     appendServerHistory(server.id, 'install')
-    await ensureSparkPlugin(server).catch(() => {})
     sendServerLog(server.id, '[Install] Syncing server to Wings daemon...')
     await syncServerToWings(server.id)
     const freshServer = getServerByUuid(server.id)
@@ -1594,7 +1653,6 @@ ipcMain.handle('server:start', async (e, serverId) => {
   sendServerLog(server.id, '[Daemon] Starting server...')
   startLogStream(server.id, { boot: true, baseline: true })
   ensureWingsWs(server.id)
-  ensureSparkPlugin(server).catch(() => {})
   try {
     const data = await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'start', wait_seconds: 0 })
     return { ok: true, data }
@@ -4042,8 +4100,6 @@ ipcMain.handle('wings:server:power', async (e, uuid, action) => {
       sendServerLog(uuid, `[Daemon] ${action === 'restart' ? 'Restarting' : 'Starting'} server...`)
       startLogStream(uuid, { boot: true, baseline: true })
       ensureWingsWs(uuid)
-      const srv = getServerByUuid(uuid)
-      if (srv) ensureSparkPlugin(srv).catch(() => {})
     } else if (action === 'stop') {
       updateServerConfig(uuid, { status: 'stopping' })
       appendServerHistory(uuid, 'stop')
