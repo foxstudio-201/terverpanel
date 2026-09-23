@@ -5,6 +5,7 @@ import VariableContainer from './VariableContainer'
 import VersionChooser from './VersionChooser'
 import LoaderChooser from './LoaderChooser'
 import { detectJavaVersion, detectDockerImageKey } from '../api/mcjars'
+import { showToast } from '../lib/toast'
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B'
@@ -119,6 +120,16 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
   const sectionBg = theme === 'light' ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.03)'
   const isElectron = typeof window !== 'undefined' && window.electronAPI
 
+  const handleTabChange = (tab) => {
+    if (tab === activeTab) return
+    setTabFade(false)
+    setTimeout(() => {
+      setPrevTab(tab)
+      setActiveTab(tab)
+      setTabFade(true)
+    }, 200)
+  }
+
   const editableVars = (eggData?.variables || []).filter(v => v.user_viewable && v.user_editable)
 
   const getEggIcon = (eggId) => {
@@ -185,7 +196,19 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
 
   const handleVersionSelect = ({ version, javaVersion, dockerImageKey }) => {
     setSelectedVersion(version)
-    setSelectedDockerImage(dockerImageKey)
+    // Prefer full yolks image when egg has no matching key (e.g. Paper without Java 25)
+    let image = dockerImageKey || ''
+    if (!image || (!image.includes('/') && !image.includes(':'))) {
+      const eggImages = eggData?.docker_images || {}
+      if (!eggImages[image] || Number(javaVersion) >= 25) {
+        if (Number(javaVersion) >= 21) image = `ghcr.io/pelican-eggs/yolks:java_${javaVersion}`
+      }
+    }
+    if (image && !image.includes('/') && !image.includes(':')) {
+      const n = String(image).match(/(\d+)/)
+      if (n) image = `ghcr.io/pelican-eggs/yolks:java_${n[1]}`
+    }
+    setSelectedDockerImage(image)
     setStep('loader')
   }
 
@@ -218,24 +241,46 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
       eggId: selectedEgg,
       version: selectedVersion,
       build: selectedBuild?.buildName || null,
+      jarUrl: selectedBuild?.jarUrl || selectedBuild?.zipUrl || null,
       dockerImage: selectedDockerImage,
+      startup: eggData?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}',
+      stopCommand: eggData?.config?.stop || 'stop',
+      donePattern: eggData?.config?.startup ? (typeof eggData.config.startup === 'string' ? (() => { try { return JSON.parse(eggData.config.startup).done || ')! For help, type' } catch { return ')! For help, type' } })() : ')! For help, type') : ')! For help, type',
       resources: {
         memory: resources.memory,
         cpuPercent: resources.cpuPercent,
         cpuCores: resources.cpuCoresUsed,
         disk: resources.disk,
       },
-      config: eggConfigVars,
-      status: 'stopped',
+      config: (() => {
+        const cfg = { ...eggConfigVars }
+        if (selectedVersion) {
+          if ('MC_VERSION' in cfg) cfg.MC_VERSION = selectedVersion
+          if ('MINECRAFT_VERSION' in cfg) cfg.MINECRAFT_VERSION = selectedVersion
+          if ('VANILLA_VERSION' in cfg) cfg.VANILLA_VERSION = selectedVersion
+          if ('DL_VERSION' in cfg) cfg.DL_VERSION = selectedVersion
+        }
+        return cfg
+      })(),
+      status: 'installing',
     }
     if (isElectron) {
       try {
-        await window.electronAPI.addServerConfig(serverData)
-        onServerCreated?.()
-        handleClose()
+        const res = await window.electronAPI.addServerConfig(serverData)
+        if (res?.ok && res.server) {
+          showToast(t(lang, 'toast.created'), 'success')
+          onServerCreated?.()
+          handleClose()
+        } else {
+          showToast(res?.error || t(lang, 'toast.failed'), 'error')
+        }
       } catch (err) {
         console.error('Failed to save server config:', err)
+        showToast(err?.message || t(lang, 'toast.failed'), 'error')
+      } finally {
+        setCreating(false)
       }
+      return
     }
     setCreating(false)
   }
@@ -459,7 +504,6 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
                 eggType={selectedEgg.split('/').pop()}
                 eggData={eggData}
                 theme={theme}
-                lang={lang}
                 onVersionSelect={handleVersionSelect}
               />
             </>
@@ -470,13 +514,15 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
                 <div>
                   <span className="text-sm font-bold" style={{ color: textColor }}>{eggData?.name}</span>
                   <span className="text-[11px] ml-2 px-1.5 py-0.5 rounded" style={{ background: inputBorder, color: labelColor }}>v{selectedVersion}</span>
+                  {selectedBuild?.buildName && (
+                    <span className="text-[11px] ml-1 px-1.5 py-0.5 rounded" style={{ background: inputBorder, color: labelColor }}>{selectedBuild.buildName}</span>
+                  )}
                 </div>
               </div>
               <LoaderChooser
                 eggType={selectedEgg.split('/').pop()}
                 version={selectedVersion}
                 theme={theme}
-                lang={lang}
                 onBuildSelect={handleBuildSelect}
               />
             </>
@@ -503,90 +549,40 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
                 />
               </Section>
 
-              {editableVars.length > 0 && (
-                <Section title={t(lang, 'modal.config')}>
-                  <div className="space-y-3">
-                    {editableVars.map((v) => {
-                      const val = eggConfigVars[v.env_variable] || ''
-                      if (v.rules?.includes('in:')) {
-                        const match = v.rules.match(/in:([^|]+)/)
-                        const options = match ? match[1].split(',') : []
-                        const labels = {
-                          '0': v.env_variable === 'WORLD_DIFFICULTY' || v.env_variable === 'DIFFICULTY' ? (lang === 'vi' ? 'Bình thường' : 'Normal') : '0',
-                          '1': v.env_variable === 'WORLD_DIFFICULTY' || v.env_variable === 'DIFFICULTY' ? (lang === 'vi' ? 'Chuyên nghiệp' : 'Expert') : (v.env_variable === 'WORLD_SIZE' ? (lang === 'vi' ? 'Trung bình' : 'Medium') : (v.env_variable === 'LANGUAGE' ? 'Deutsch' : '1')),
-                          '2': v.env_variable === 'WORLD_DIFFICULTY' || v.env_variable === 'DIFFICULTY' ? (lang === 'vi' ? 'Bậc thầy' : 'Master') : (v.env_variable === 'WORLD_SIZE' ? (lang === 'vi' ? 'Lớn' : 'Large') : (v.env_variable === 'LANGUAGE' ? 'Italiano' : '2')),
-                          '3': v.env_variable === 'WORLD_DIFFICULTY' || v.env_variable === 'DIFFICULTY' ? (lang === 'vi' ? 'Hành trình' : 'Journey') : (v.env_variable === 'LANGUAGE' ? 'Français' : '3'),
-                          '4': v.env_variable === 'LANGUAGE' ? 'Español' : '4',
-                          '5': v.env_variable === 'LANGUAGE' ? 'Português' : '5',
-                        }
-                        return (
-                          <div key={v.env_variable}>
-                            <label className="block text-xs mb-1" style={{ color: labelColor }}>{v.name}</label>
-                            <CustomSelect
-                              value={val}
-                              options={options}
-                              labels={labels}
-                              onChange={(v2) => setEggConfigVars({ ...eggConfigVars, [v.env_variable]: v2 })}
-                            />
-                          </div>
-                        )
-                      }
-                      if (v.env_variable === 'PASSWORD' || v.env_variable === 'SERVER_PASSWORD') {
-                        return (
-                          <div key={v.env_variable}>
-                            <label className="block text-xs mb-1" style={{ color: labelColor }}>{v.name}</label>
-                            <input
-                              type="password"
-                              value={val}
-                              onChange={(e) => setEggConfigVars({ ...eggConfigVars, [v.env_variable]: e.target.value })}
-                              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                              style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
-                              placeholder={lang === 'vi' ? 'Để trống nếu không muốn đặt mật khẩu' : 'Leave empty for no password'}
-                            />
-                          </div>
-                        )
-                      }
-                      return (
-                        <div key={v.env_variable}>
-                          <label className="block text-xs mb-1" style={{ color: labelColor }}>{v.name}</label>
-                          <input
-                            value={val}
-                            onChange={(e) => setEggConfigVars({ ...eggConfigVars, [v.env_variable]: e.target.value })}
-                            className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                            style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
-                            placeholder={v.default_value || ''}
-                          />
-                          {v.description && (
-                            <p className="text-[10px] mt-0.5" style={{ color: labelColor }}>{v.description.split('\r\n')[0]}</p>
-                          )}
-                        </div>
-                      )
-                    })}
+              <Section title={t(lang, 'modal.config')}>
+                <div className="space-y-3">
+                  <Toggle label={t(lang, 'modal.eula')} checked={serverConfig.eula} onChange={(v) => setServerConfig({ ...serverConfig, eula: v })} />
+                  <Toggle label={t(lang, 'modal.onlineMode')} checked={serverConfig.onlineMode} onChange={(v) => setServerConfig({ ...serverConfig, onlineMode: v })} />
+                  <div>
+                    <label className="block text-xs mb-1" style={{ color: labelColor }}>{t(lang, 'modal.motd')}</label>
+                    <input
+                      value={serverConfig.motd}
+                      onChange={(e) => setServerConfig({ ...serverConfig, motd: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                      style={{ background: inputBg, border: `1px solid ${inputBorder}`, color: textColor }}
+                      placeholder="A Minecraft Server"
+                    />
                   </div>
-                </Section>
-              )}
+                </div>
+              </Section>
 
-              {resources && (
-                <Section title={t(lang, 'modal.resources')}>
-                  <div className="space-y-3">
-                    <SliderInput label={t(lang, 'modal.ram')} value={resources.memory} onChange={(v) => setResources({ ...resources, memory: v })} min={512} max={32768} step={256} unit="MB" />
-                    <SliderInput label={t(lang, 'modal.cpu')} value={resources.cpuPercent} onChange={(v) => setResources({ ...resources, cpuPercent: v })} min={10} max={400} step={10} unit="%" />
-                    {resources.cpuCores > 1 && (
-                      <SliderInput label={t(lang, 'modal.cpuCores')} value={resources.cpuCoresUsed} onChange={(v) => setResources({ ...resources, cpuCoresUsed: Math.min(v, resources.cpuCores) })} min={1} max={resources.cpuCores} step={1} unit={t(lang, 'modal.cores')} />
-                    )}
-                    <SliderInput label={t(lang, 'modal.disk')} value={resources.disk} onChange={(v) => setResources({ ...resources, disk: v })} min={1024} max={102400} step={1024} unit="MB" />
-                  </div>
-                </Section>
-              )}
+              <Section title={t(lang, 'modal.resources')}>
+                <div className="space-y-3">
+                  <SliderInput label="RAM" value={resources.memory} onChange={(v) => setResources({ ...resources, memory: v })} min={512} max={32768} step={256} unit="MB" />
+                  <SliderInput label="CPU" value={resources.cpu} onChange={(v) => setResources({ ...resources, cpu: v })} min={10} max={400} step={10} unit="%" />
+                  <SliderInput label="Disk" value={resources.disk} onChange={(v) => setResources({ ...resources, disk: v })} min={1024} max={102400} step={1024} unit="MB" />
+                </div>
+              </Section>
 
               <button
                 onClick={handleCreate}
-                className="w-full py-2.5 rounded-xl text-sm font-semibold transition-all mt-2"
+                disabled={creating}
+                className="w-full py-2.5 rounded-xl text-sm font-semibold transition-all duration-150 mt-2 hover:opacity-80 hover:brightness-110 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{ background: '#a78bfa', color: '#fff' }}
-                onMouseEnter={(e) => e.target.style.background = '#8b5cf6'}
-                onMouseLeave={(e) => e.target.style.background = '#a78bfa'}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#8b5cf6'}
+                onMouseLeave={(e) => e.currentTarget.style.background = '#a78bfa'}
               >
-                {t(lang, 'modal.create')}
+                {creating ? (lang === 'vi' ? 'Đang tạo…' : 'Creating…') : t(lang, 'modal.create')}
               </button>
             </>
           )}
@@ -596,7 +592,7 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
   )
 }
 
-function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete }) {
+function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete, onOpen }) {
   const textColor = '#fff'
   const labelColor = 'rgba(255,255,255,0.6)'
   const inputBg = 'rgba(255,255,255,0.1)'
@@ -605,14 +601,15 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete 
 
   const bgImage = server.game === 'minecraft' ? './Minecraft_backgound.png' : './terraria_backgound.png'
   const gameIcon = server.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'
-  const statusColor = server.status === 'running' ? '#22c55e' : server.status === 'installing' ? '#eab308' : '#ef4444'
+  const statusColor = server.status === 'running' ? '#22c55e' : server.status === 'installing' || server.status === 'starting' ? '#eab308' : server.status === 'error' ? '#ef4444' : '#6b7280'
   const serverIp = '127.0.0.1'
   const serverPort = '25565'
 
   return (
     <div
-      className="rounded-2xl overflow-hidden relative transition-all hover:scale-[1.01]"
+      className="rounded-2xl overflow-hidden relative transition-all hover:scale-[1.01] cursor-pointer"
       style={{ border: `1px solid ${dividerColor}` }}
+      onClick={() => { if (!menuOpen && onOpen) onOpen(server) }}
     >
       <img src={bgImage} alt="" className="absolute inset-0 w-full h-full object-cover" />
       <div className="absolute inset-0" style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.7) 40%, rgba(0,0,0,0.4) 100%)' }} />
@@ -624,12 +621,20 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete 
           <div className="flex-1 min-w-0">
             <p className="text-sm font-bold truncate" style={{ color: textColor }}>{server.name}</p>
             <p className="text-[11px] truncate" style={{ color: labelColor }}>{server.egg}</p>
+            {(server.status === 'installing') && server.installProgress != null && (
+              <div className="mt-1.5">
+                <div className="w-full h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.1)' }}>
+                  <div className="h-full rounded-full transition-all" style={{ width: `${server.installProgress}%`, background: '#eab308' }} />
+                </div>
+                <p className="text-[9px] mt-0.5 truncate" style={{ color: '#eab308' }}>{server.installMessage || 'Installing...'}</p>
+              </div>
+            )}
           </div>
           <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: statusColor }} />
           {/* Menu button */}
           <div className="relative">
             <button
-              onClick={() => setMenuOpen(!menuOpen)}
+              onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen) }}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
               style={{ background: menuOpen ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)', color: textColor }}
             >
@@ -725,7 +730,7 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete 
   )
 }
 
-function HomePage({ theme, lang, onServerCreated }) {
+function HomePage({ theme, lang, onServerCreated, onSelectServer }) {
   const [activeTab, setActiveTab] = useState('servers')
   const [tabFade, setTabFade] = useState(true)
   const [prevTab, setPrevTab] = useState('servers')
@@ -747,6 +752,7 @@ function HomePage({ theme, lang, onServerCreated }) {
   const [imgKey, setImgKey] = useState(0)
   const [visibleCount, setVisibleCount] = useState(20)
   const versionListRef = useRef(null)
+  const installingRef = useRef(new Set())
 
   const isElectron = typeof window !== 'undefined' && window.electronAPI
 
@@ -783,7 +789,32 @@ function HomePage({ theme, lang, onServerCreated }) {
       }).catch(() => setLoadingServers(false))
     }
     loadServers()
+
+    if (window.electronAPI.onServerProgress) {
+      const cleanup = window.electronAPI.onServerProgress(({ serverId, percent, message }) => {
+        setServers((prev) => prev.map(s => s.id === serverId ? { ...s, installProgress: percent, installMessage: message, status: percent >= 100 ? 'stopped' : 'installing' } : s))
+      })
+      return () => { if (typeof cleanup === 'function') cleanup() }
+    }
   }, [serverRefreshKey])
+
+  useEffect(() => {
+    if (!isElectron) return
+    servers.forEach(s => {
+      if (s.status === 'installing' && !s.installedAt && !installingRef.current.has(s.id)) {
+        installingRef.current.add(s.id)
+        window.electronAPI.installServer(s.id).then((res) => {
+          installingRef.current.delete(s.id)
+          if (!res?.ok) {
+            setServers(prev => prev.map(x => x.id === s.id ? { ...x, status: 'error', installMessage: res?.error || 'Install failed' } : x))
+          }
+        }).catch(() => {
+          installingRef.current.delete(s.id)
+          setServers(prev => prev.map(x => x.id === s.id ? { ...x, status: 'error', installMessage: 'Install failed' } : x))
+        })
+      }
+    })
+  }, [servers])
 
   const bg = theme === 'light' ? '#f5f5f5' : '#0a0a0a'
   const textColor = theme === 'light' ? '#111' : '#fff'
@@ -836,49 +867,68 @@ function HomePage({ theme, lang, onServerCreated }) {
   const handleStartServer = async (server) => {
     if (!isElectron) return
     try {
-      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'installing' } : s))
-      await window.electronAPI.startServer({ name: server.name, egg: server.eggId, dockerImage: server.dockerImage, config: server.config, resources: server.resources })
+      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'starting' } : s))
+      const res0 = await window.electronAPI.startGameServer(server.id)
+      if (res0?.ok) showToast(t(lang, 'toast.starting'), 'success')
+      else showToast(res0?.error || t(lang, 'toast.failed'), 'error')
       const res = await window.electronAPI.getServerConfigs()
-      if (res?.ok) setServers(res.configs || [])
+      if (res?.ok) setServers(res.servers || [])
     } catch (err) {
       console.error('Start server failed:', err)
+      showToast(t(lang, 'toast.failed'), 'error')
       const res = await window.electronAPI.getServerConfigs()
-      if (res?.ok) setServers(res.configs || [])
+      if (res?.ok) setServers(res.servers || [])
     }
   }
 
   const handleStopServer = async (server) => {
     if (!isElectron) return
     try {
-      await window.electronAPI.stopServer(server.name)
+      const res0 = await window.electronAPI.stopGameServer(server.id)
+      if (res0?.ok) showToast(t(lang, 'toast.stopping'), 'success')
+      else showToast(res0?.error || t(lang, 'toast.failed'), 'error')
       const res = await window.electronAPI.getServerConfigs()
-      if (res?.ok) setServers(res.configs || [])
+      if (res?.ok) setServers(res.servers || [])
     } catch (err) {
       console.error('Stop server failed:', err)
+      showToast(t(lang, 'toast.failed'), 'error')
     }
   }
 
   const handleRestartServer = async (server) => {
     if (!isElectron) return
     try {
-      await window.electronAPI.stopServer(server.name)
-      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'installing' } : s))
-      await window.electronAPI.startServer({ name: server.name, egg: server.eggId, dockerImage: server.dockerImage, config: server.config, resources: server.resources })
+      setServers((prev) => prev.map((s) => s.id === server.id ? { ...s, status: 'starting' } : s))
+      let res0
+      if (window.electronAPI?.wingsServerPower) {
+        res0 = await window.electronAPI.wingsServerPower(server.id, 'restart')
+      } else {
+        res0 = await window.electronAPI.stopGameServer(server.id)
+        if (res0?.ok) res0 = await window.electronAPI.startGameServer(server.id)
+      }
+      if (res0?.ok) showToast(t(lang, 'toast.restarting'), 'success')
+      else showToast(res0?.error || t(lang, 'toast.failed'), 'error')
       const res = await window.electronAPI.getServerConfigs()
-      if (res?.ok) setServers(res.configs || [])
+      if (res?.ok) setServers(res.servers || [])
     } catch (err) {
       console.error('Restart server failed:', err)
+      showToast(t(lang, 'toast.failed'), 'error')
       const res = await window.electronAPI.getServerConfigs()
-      if (res?.ok) setServers(res.configs || [])
+      if (res?.ok) setServers(res.servers || [])
     }
   }
 
   const handleDeleteServer = async (server) => {
     if (!isElectron) return
     try {
-      await window.electronAPI.removeServerConfig(server.id)
-      setServers((prev) => prev.filter(s => s.id !== server.id))
+      await window.electronAPI.wingsDeleteServer(server.id)
     } catch {}
+    try {
+      await window.electronAPI.removeServerConfig(server.id)
+    } catch {}
+    setServers((prev) => prev.filter(s => s.id !== server.id))
+    showToast(t(lang, 'toast.deleted'), 'success')
+    onServerCreated?.()
   }
 
   useEffect(() => {
@@ -955,6 +1005,7 @@ function HomePage({ theme, lang, onServerCreated }) {
                       onStop={handleStopServer}
                       onRestart={handleRestartServer}
                       onDelete={handleDeleteServer}
+                      onOpen={onSelectServer}
                     />
                   ))}
                 </div>

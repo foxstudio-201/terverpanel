@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AppProvider, useApp } from './i18n/AppContext'
 import { t } from './i18n/translations'
-import { House, Gear, Heart, Cube, List, Terminal, Files, Database, Clock, Users, Archive, Network, Play, GearSix, ArrowLeft } from '@phosphor-icons/react'
+import { House, Gear, Heart, Cube, List, Terminal, Files, Database, Clock, Users, Archive, Network, Play, GearSix, ArrowLeft, ChartLineUp } from '@phosphor-icons/react'
 import TitleBar from './components/TitleBar'
 import CloseModal from './components/CloseModal'
 import TooltipProvider from './components/ui/TooltipProvider'
+import ToastHost from './components/ui/ToastHost'
 import NodePage from './components/NodePage'
 import LoginPage from './components/LoginPage'
 import HomePage from './components/HomePage'
@@ -26,6 +27,7 @@ function Spinner({ theme, lang, text }) {
 }
 
 const SERVER_PANEL_PAGES = [
+  { key: 'server-overview', icon: ChartLineUp, label: 'Overview', labelVi: 'Tổng quan' },
   { key: 'server-console', icon: Terminal, label: 'Console', labelVi: 'Bảng điều khiển' },
   { key: 'server-files', icon: Files, label: 'Files', labelVi: 'Tệp tin' },
   { key: 'server-databases', icon: Database, label: 'Databases', labelVi: 'Cơ sở dữ liệu' },
@@ -140,7 +142,7 @@ function AppContent() {
   const handleSelectServer = (srv) => {
     setSelectedSidebarServer(srv)
     setShowServerDropdown(false)
-    navigateTo('server-console')
+    navigateTo('server-overview')
   }
 
   const handleBackFromServer = () => {
@@ -399,16 +401,17 @@ function AppContent() {
 
         <div className="flex-1 ml-[180px] overflow-hidden">
           <div className={`h-full ${transitionClass}`}>
-            {displayPage === 'servers' && <HomePage theme={theme} lang={lang} onServerCreated={refreshSidebarServers} />}
+            {displayPage === 'servers' && <HomePage theme={theme} lang={lang} onServerCreated={refreshSidebarServers} onSelectServer={handleSelectServer} />}
             {displayPage === 'donate' && <DonatePage theme={theme} lang={lang} />}
             {displayPage === 'docker' && <NodePage theme={theme} lang={lang} />}
             {displayPage === 'settings' && <SettingsPage theme={theme} lang={lang} />}
             {isInServerPanel && selectedSidebarServer && (
-              <ServerPanel server={selectedSidebarServer} theme={theme} lang={lang} displayPage={displayPage} onBack={handleBackFromServer} onServerDeleted={refreshSidebarServers} />
+              <ServerPanel key={selectedSidebarServer.id} server={selectedSidebarServer} theme={theme} lang={lang} displayPage={displayPage} onBack={handleBackFromServer} onServerDeleted={refreshSidebarServers} onServerUpdate={(srv) => setSelectedSidebarServer(srv)} />
             )}
           </div>
         </div>
 
+        <ToastHost theme={theme} />
         {dockerToast && (
           <div className="fixed bottom-5 right-5 z-[70]">
             <div
@@ -447,7 +450,7 @@ function AppContent() {
 
   return (
     <div className="w-screen h-screen flex flex-col overflow-hidden relative z-10" style={{ background: 'transparent' }}>
-      <TitleBar onCloseRequest={handleCloseRequest} user={displaySession?.user} onLogout={handleLogout} lang={lang} theme={theme} />
+      <TitleBar onCloseRequest={handleCloseRequest} user={displaySession?.user} onLogout={handleLogout} lang={lang} theme={theme} server={selectedSidebarServer} />
       {renderContent()}
       {showCloseModal && (
         <CloseModal onClose={() => setShowCloseModal(false)} />

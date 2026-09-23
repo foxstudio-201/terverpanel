@@ -2777,7 +2777,11 @@ function startWingsApiServer() {
               environment: env,
               labels: {},
               backups: [],
-              schedules: [],
+              schedules: (readDB().schedules || []).filter(sch => sch.serverId === s.id).map(sch => ({
+                id: sch.id, name: sch.name, cron: sch.cron,
+                is_active: !!sch.isActive, is_processing: !!sch.isProcessing,
+                last_run_at: sch.lastRunAt, next_run_at: sch.nextRunAt,
+              })),
               allocations: {
                 force_outgoing_ip: false,
                 default: { ip: '0.0.0.0', port: s.port || 25565 },
@@ -2917,7 +2921,7 @@ function startWingsApiServer() {
       res.json({ ok: true })
     })
 
-    // Schedule
+    // Schedule (panel runs its own cron runner; just acknowledge Wings callbacks)
     apiApp.post('/api/remote/schedule', (req, res) => {
       res.json({ ok: true })
     })
@@ -3475,6 +3479,432 @@ ipcMain.handle('database:install', async (e) => {
   }
 })
 
+// ─── Schedules (cron + multi-step like Calagopus) ───────────────────
+function listSchedules(serverId) {
+  const db = readDB()
+  return (db.schedules || []).filter(s => !serverId || s.serverId === serverId)
+}
+
+function writeSchedules(list) {
+  const db = readDB()
+  db.schedules = list
+  writeDB(db)
+}
+
+function getScheduleById(id) {
+  return listSchedules().find(s => s.id === id) || null
+}
+
+function saveSchedule(schedule) {
+  const list = listSchedules()
+  const idx = list.findIndex(s => s.id === schedule.id)
+  schedule.updatedAt = Date.now()
+  if (idx >= 0) list[idx] = schedule
+  else list.push(schedule)
+  writeSchedules(list)
+  return schedule
+}
+
+function parseCronField(field, min, max) {
+  const values = new Set()
+  for (const part of String(field || '').split(',')) {
+    const p = part.trim()
+    if (!p) continue
+    if (p === '*') {
+      for (let i = min; i <= max; i++) values.add(i)
+      continue
+    }
+    const stepMatch = p.match(/^(\*|\d+(?:-\d+)?)\/(\d+)$/)
+    if (stepMatch) {
+      const step = parseInt(stepMatch[2], 10)
+      if (!step || step < 1) continue
+      let start = min
+      let end = max
+      if (stepMatch[1] !== '*') {
+        const range = stepMatch[1].split('-')
+        start = parseInt(range[0], 10)
+        end = range.length > 1 ? parseInt(range[1], 10) : max
+      }
+      for (let i = start; i <= end; i += step) {
+        if (i >= min && i <= max) values.add(i)
+      }
+      continue
+    }
+    const rangeMatch = p.match(/^(\d+)-(\d+)$/)
+    if (rangeMatch) {
+      const a = parseInt(rangeMatch[1], 10)
+      const b = parseInt(rangeMatch[2], 10)
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+        if (i >= min && i <= max) values.add(i)
+      }
+      continue
+    }
+    const n = parseInt(p, 10)
+    if (!Number.isNaN(n) && n >= min && n <= max) values.add(n)
+  }
+  return values
+}
+
+function isValidCron(cron) {
+  const parts = String(cron || '').trim().split(/\s+/)
+  if (parts.length !== 5) return false
+  const mins = parseCronField(parts[0], 0, 59)
+  const hours = parseCronField(parts[1], 0, 23)
+  const doms = parseCronField(parts[2], 1, 31)
+  const mons = parseCronField(parts[3], 1, 12)
+  const dows = parseCronField(parts[4], 0, 7)
+  return mins.size > 0 && hours.size > 0 && doms.size > 0 && mons.size > 0 && dows.size > 0
+}
+
+function cronMatches(cron, date) {
+  const parts = String(cron || '').trim().split(/\s+/)
+  if (parts.length !== 5) return false
+  const mins = parseCronField(parts[0], 0, 59)
+  const hours = parseCronField(parts[1], 0, 23)
+  const doms = parseCronField(parts[2], 1, 31)
+  const mons = parseCronField(parts[3], 1, 12)
+  const dows = parseCronField(parts[4], 0, 7)
+  const dow = date.getDay()
+  const domMatch = doms.has(date.getDate())
+  const dowMatch = dows.has(dow) || dows.has(7)
+  // Standard cron: if both dom and dow are restricted (not *), OR them
+  const domAll = parts[2] === '*'
+  const dowAll = parts[4] === '*'
+  const dayOk = (domAll && dowAll) || (!domAll && !dowAll && (domMatch || dowMatch)) || (!domAll && dowAll && domMatch) || (domAll && !dowAll && dowMatch)
+  return mins.has(date.getMinutes()) && hours.has(date.getHours()) && mons.has(date.getMonth() + 1) && dayOk
+}
+
+function nextCronRun(cron, from = Date.now()) {
+  const start = new Date(from)
+  start.setSeconds(0, 0)
+  start.setMinutes(start.getMinutes() + 1)
+  for (let i = 0; i < 366 * 24 * 60; i++) {
+    const d = new Date(start.getTime() + i * 60000)
+    if (cronMatches(cron, d)) return d.getTime()
+  }
+  return null
+}
+
+function humanizeCron(cron) {
+  const parts = String(cron || '').trim().split(/\s+/)
+  if (parts.length !== 5) return cron || ''
+  const [min, hour, dom, mon, dow] = parts
+  if (min === '*' && hour === '*') return 'Every minute'
+  if (/^\*\/\d+$/.test(min) && hour === '*') return `Every ${min.slice(2)} minutes`
+  if (min === '0' && hour === '*') return 'Every hour (on the hour)'
+  if (min === '0' && /^\*\/\d+$/.test(hour)) return `Every ${hour.slice(2)} hours`
+  if (min !== '*' && /^\d+$/.test(min) && hour !== '*' && /^\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '*') {
+    const h = parseInt(hour, 10)
+    const ampm = h < 12 ? 'AM' : 'PM'
+    const h12 = h % 12 === 0 ? 12 : h % 12
+    return `Daily at ${h12}:${min.padStart(2, '0')} ${ampm}`
+  }
+  if (min === '0' && hour === '0' && dom === '*' && mon === '*' && dow === '*') return 'Daily at 00:00'
+  if (min === '0' && hour === '0' && dom === '1' && mon === '*' && dow === '*') return 'Monthly on day 1 at 00:00'
+  if (min === '0' && hour === '0' && dom === '*' && mon === '*' && (dow === '0' || dow === '7')) return 'Weekly on Sunday at 00:00'
+  if (min === '0' && hour === '0' && dom === '*' && mon === '*' && dow === '1') return 'Weekly on Monday at 00:00'
+  return `Cron: ${cron}`
+}
+
+async function executeScheduleStep(serverId, step) {
+  const action = step.action || 'command'
+  if (action === 'power') {
+    const power = step.power || 'start'
+    ensureEula(serverId)
+    if (power === 'start' || power === 'restart') ensureJava(serverId)
+    await wingsApiCall('POST', `/api/servers/${serverId}/power`, { action: power, wait_seconds: 0 })
+    if (power === 'start' || power === 'restart') {
+      updateServerConfig(serverId, { status: 'starting' })
+      appendServerHistory(serverId, power === 'restart' ? 'restart' : 'start')
+      beginLogSession(serverId)
+      sendServerLog(serverId, `[Schedule] Power → ${power}`)
+      startLogStream(serverId, { boot: true, baseline: true })
+      ensureWingsWs(serverId)
+    } else if (power === 'stop') {
+      updateServerConfig(serverId, { status: 'stopping' })
+      appendServerHistory(serverId, 'stop')
+      stopTpsPoller(serverId)
+      clearServerTps(serverId)
+      sendServerLog(serverId, '[Schedule] Power → stop')
+      stopLogStream(serverId)
+      startLogStream(serverId, { baseline: true })
+      ensureWingsWs(serverId)
+      scheduleStopCleanup(serverId, 15000)
+    } else if (power === 'kill') {
+      updateServerConfig(serverId, { status: 'stopped' })
+      appendServerHistory(serverId, 'kill')
+      stopTpsPoller(serverId)
+      clearServerTps(serverId)
+      sendServerLog(serverId, '[Schedule] Power → kill')
+      stopLogStream(serverId)
+      await wingsApiCall('POST', `/api/servers/${serverId}/power`, { action: 'kill', wait_seconds: 0 })
+      closeWingsWs(serverId, { reconnect: false })
+    }
+    return true
+  }
+  if (action === 'command') {
+    const cmd = String(step.command || '').trim()
+    if (!cmd) throw new Error('Empty command')
+    sendServerLog(serverId, `[Schedule] > ${cmd}`)
+    await wingsApiCall('POST', `/api/servers/${serverId}/commands`, { commands: [cmd] })
+    return true
+  }
+  if (action === 'backup') {
+    const server = getServerByUuid(serverId)
+    if (!server) throw new Error('Server not found')
+    const srcDir = path.join(WINGS_DATA_DIR, serverId)
+    const backupsDir = path.join(srcDir, 'backups')
+    if (!fs.existsSync(srcDir)) throw new Error('Server directory missing')
+    fs.mkdirSync(backupsDir, { recursive: true, mode: 0o755 })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const outName = `schedule-${stamp}.tar.gz`
+    const outPath = path.join(backupsDir, outName)
+    const res = await runProc('tar', ['-czf', outPath, '-C', srcDir, '--exclude=backups', '.'], { timeout: 120000 })
+    if (res.status !== 0) throw new Error(res.stderr || 'Backup failed')
+    sendServerLog(serverId, `[Schedule] Backup created: ${outName}`)
+    return true
+  }
+  throw new Error(`Unknown action: ${action}`)
+}
+
+async function runScheduleNow(scheduleId, { manual = false } = {}) {
+  const schedule = getScheduleById(scheduleId)
+  if (!schedule) return { ok: false, error: 'Schedule not found' }
+  if (schedule.isProcessing) return { ok: false, error: 'Already running' }
+  const server = getServerByUuid(schedule.serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  schedule.isProcessing = true
+  schedule.lastRunAt = Date.now()
+  schedule.lastStatus = 'running'
+  schedule.lastError = null
+  saveSchedule(schedule)
+  emitScheduleUpdate(schedule)
+
+  const steps = Array.isArray(schedule.steps) ? schedule.steps : []
+  let failed = null
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    if (step.delay > 0) {
+      await new Promise(r => setTimeout(r, Math.min(step.delay, 600000) * 1000))
+    }
+    try {
+      await executeScheduleStep(schedule.serverId, step)
+      sendServerLog(schedule.serverId, `[Schedule] "${schedule.name}" step ${i + 1}/${steps.length} OK`)
+    } catch (err) {
+      const cont = !!step.continueOnFailure
+      sendServerLog(schedule.serverId, `[Schedule] "${schedule.name}" step ${i + 1} FAILED: ${err.message}`)
+      if (!cont) {
+        failed = err.message
+        break
+      }
+    }
+  }
+
+  const fresh = getScheduleById(scheduleId) || schedule
+  fresh.isProcessing = false
+  fresh.lastStatus = failed ? 'failed' : 'success'
+  fresh.lastError = failed
+  fresh.nextRunAt = fresh.isActive ? nextCronRun(fresh.cron) : null
+  saveSchedule(fresh)
+  emitScheduleUpdate(fresh)
+  if (manual) {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('schedule:ran', { id: fresh.id, ok: !failed, error: failed })
+    }
+  }
+  return { ok: !failed, error: failed }
+}
+
+function emitScheduleUpdate(schedule) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('schedule:update', schedule)
+  }
+}
+
+const _scheduleRunning = new Set()
+
+function scheduleTick() {
+  try {
+    const now = Date.now()
+    const list = listSchedules()
+    for (const s of list) {
+      if (!s.isActive || s.isProcessing) continue
+      if (_scheduleRunning.has(s.id)) continue
+      if (!s.nextRunAt) {
+        s.nextRunAt = nextCronRun(s.cron)
+        saveSchedule(s)
+        continue
+      }
+      if (now >= s.nextRunAt) {
+        // catch up: advance nextRun first to avoid double-fire
+        s.nextRunAt = nextCronRun(s.cron, now)
+        saveSchedule(s)
+        _scheduleRunning.add(s.id)
+        runScheduleNow(s.id)
+          .catch(() => {})
+          .finally(() => _scheduleRunning.delete(s.id))
+      }
+    }
+  } catch (err) {
+    console.error('[Schedule] tick error:', err.message)
+  }
+}
+
+let _scheduleTimer = null
+function startScheduler() {
+  if (_scheduleTimer) return
+  // seed nextRun for any active schedules missing it
+  try {
+    const list = listSchedules()
+    let dirty = false
+    for (const s of list) {
+      if (s.isActive && !s.nextRunAt) {
+        s.nextRunAt = nextCronRun(s.cron)
+        dirty = true
+      }
+      if (!s.isActive) s.nextRunAt = null
+    }
+    if (dirty) writeSchedules(list)
+  } catch {}
+  _scheduleTimer = setInterval(scheduleTick, 30000)
+  scheduleTick()
+}
+
+ipcMain.handle('schedule:list', (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const schedules = listSchedules(serverId).map(s => ({
+      ...s,
+      humanCron: humanizeCron(s.cron),
+    }))
+    return { ok: true, schedules }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:create', (e, serverId, data) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server) return { ok: false, error: 'Server not found' }
+    const cron = String(data?.cron || '').trim()
+    if (!isValidCron(cron)) return { ok: false, error: 'Invalid cron' }
+    const name = String(data?.name || '').trim() || 'Schedule'
+    const steps = (Array.isArray(data?.steps) ? data.steps : [])
+      .filter(s => s && (s.action === 'command' || s.action === 'power' || s.action === 'backup'))
+      .map(s => ({
+        id: generateUUID(),
+        action: s.action,
+        command: s.action === 'command' ? String(s.command || '') : undefined,
+        power: s.action === 'power' ? String(s.power || 'start') : undefined,
+        delay: Math.max(0, Math.min(600, Number(s.delay) || 0)),
+        continueOnFailure: !!s.continueOnFailure,
+      }))
+    if (steps.length === 0) return { ok: false, error: 'At least one step required' }
+    const isActive = data?.isActive !== false
+    const schedule = {
+      id: generateUUID(),
+      serverId: server.id,
+      name,
+      cron,
+      isActive,
+      isProcessing: false,
+      steps,
+      lastRunAt: null,
+      nextRunAt: isActive ? nextCronRun(cron) : null,
+      lastStatus: null,
+      lastError: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    saveSchedule(schedule)
+    emitScheduleUpdate(schedule)
+    return { ok: true, schedule: { ...schedule, humanCron: humanizeCron(cron) } }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:update', (e, scheduleId, data) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const schedule = getScheduleById(scheduleId)
+    if (!schedule) return { ok: false, error: 'Schedule not found' }
+    if (data?.name !== undefined) schedule.name = String(data.name).trim() || schedule.name
+    if (data?.cron !== undefined) {
+      const cron = String(data.cron).trim()
+      if (!isValidCron(cron)) return { ok: false, error: 'Invalid cron' }
+      schedule.cron = cron
+      schedule.nextRunAt = schedule.isActive ? nextCronRun(cron) : null
+    }
+    if (data?.isActive !== undefined) {
+      schedule.isActive = !!data.isActive
+      schedule.nextRunAt = schedule.isActive ? nextCronRun(schedule.cron) : null
+    }
+    if (Array.isArray(data?.steps)) {
+      const steps = data.steps
+        .filter(s => s && (s.action === 'command' || s.action === 'power' || s.action === 'backup'))
+        .map(s => ({
+          id: s.id || generateUUID(),
+          action: s.action,
+          command: s.action === 'command' ? String(s.command || '') : undefined,
+          power: s.action === 'power' ? String(s.power || 'start') : undefined,
+          delay: Math.max(0, Math.min(600, Number(s.delay) || 0)),
+          continueOnFailure: !!s.continueOnFailure,
+        }))
+      if (steps.length === 0) return { ok: false, error: 'At least one step required' }
+      schedule.steps = steps
+    }
+    saveSchedule(schedule)
+    emitScheduleUpdate(schedule)
+    return { ok: true, schedule: { ...schedule, humanCron: humanizeCron(schedule.cron) } }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:delete', (e, scheduleId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const list = listSchedules().filter(s => s.id !== scheduleId)
+    writeSchedules(list)
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('schedule:deleted', { id: scheduleId })
+    }
+    return { ok: true }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:toggle', (e, scheduleId, isActive) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const schedule = getScheduleById(scheduleId)
+    if (!schedule) return { ok: false, error: 'Schedule not found' }
+    schedule.isActive = isActive !== false
+    schedule.nextRunAt = schedule.isActive ? nextCronRun(schedule.cron) : null
+    saveSchedule(schedule)
+    emitScheduleUpdate(schedule)
+    return { ok: true, schedule: { ...schedule, humanCron: humanizeCron(schedule.cron) } }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:run', async (e, scheduleId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    return await runScheduleNow(scheduleId, { manual: true })
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('schedule:preview', (e, cron) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const c = String(cron || '').trim()
+    const valid = isValidCron(c)
+    return {
+      ok: true,
+      valid,
+      human: valid ? humanizeCron(c) : '',
+      nextRunAt: valid ? nextCronRun(c) : null,
+    }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
 app.whenReady().then(() => {
   const { session } = require('electron')
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -3496,6 +3926,7 @@ app.whenReady().then(() => {
   createMainWindow()
   createTray()
   startWingsApiServer()
+  startScheduler()
 
   // Auto-start services based on settings
   setTimeout(() => {

@@ -6,7 +6,7 @@ export default function NetworkPage({ server, theme, lang }) {
   const labelColor = theme === 'light' ? '#555' : 'rgba(255,255,255,0.6)'
   const borderColor = theme === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
 
-  const [allocations] = useState(server?.allocations || [{ ip: '0.0.0.0', port: 25565 }])
+  const [allocations] = useState(server?.allocations || [{ ip: '0.0.0.0', port: server?.port || 25565 }])
 
   return (
     <div className="h-full flex flex-col overflow-hidden p-4">

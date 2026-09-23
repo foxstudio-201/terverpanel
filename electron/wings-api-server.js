@@ -82,7 +82,16 @@ function getServers() {
         start_on_completion: false,
         meta: { name: s.name, description: s.name, startup_command: finalStartup, egg: { id: '00000000-0000-0000-0000-000000000001' } },
         suspended: false, invocation: finalStartup, skip_egg_scripts: false,
-        entrypoint: null, environment: env, labels: {}, backups: [], schedules: [],
+        entrypoint: null, environment: env, labels: {}, backups: [],
+        schedules: getSchedules(s.id).map(sch => ({
+          id: sch.id,
+          name: sch.name,
+          cron: sch.cron,
+          is_active: !!sch.isActive,
+          is_processing: !!sch.isProcessing,
+          last_run_at: sch.lastRunAt,
+          next_run_at: sch.nextRunAt,
+        })),
         allocations: { force_outgoing_ip: false, default: { ip: '0.0.0.0', port: s.port || 25565 }, mappings: {} },
         build: { memory_limit: res.memory || 1024, overhead_memory: 0, swap: 0, io_weight: null,
           cpu_limit: res.cpuPercent || 100, disk_space: res.disk || 10240,
@@ -104,6 +113,11 @@ function getServers() {
 
 function getServer(uuid) { return getServers().find(s => s.settings?.uuid === uuid) || null }
 function getServerByUuid(uuid) { const db = readDB(); return (db.servers || []).find(s => s.id === uuid) || null }
+
+function getSchedules(serverUuid) {
+  const db = readDB()
+  return (db.schedules || []).filter(s => !serverUuid || s.serverId === serverUuid)
+}
 
 function parseBody(req) {
   return new Promise((resolve) => {
@@ -304,7 +318,11 @@ const server = http.createServer(async (req, res) => {
 
     // Activity
     if (reqPath === '/api/remote/activity' && method === 'POST') { return sendJson(res, 200, { ok: true }) }
-    if (reqPath === '/api/remote/schedule' && method === 'POST') { return sendJson(res, 200, { ok: true }) }
+    if (reqPath === '/api/remote/schedule' && method === 'POST') {
+      const body = await parseBody(req)
+      // Wings fires schedule notifications; just acknowledge (panel runs its own cron runner)
+      return sendJson(res, 200, { ok: true, received: body || {} })
+    }
     if (reqPath === '/api/remote/sftp/auth' && method === 'POST') { return sendJson(res, 401, { error: 'SFTP not supported in local mode' }) }
 
     // Catch-all for unknown endpoints

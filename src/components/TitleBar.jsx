@@ -55,7 +55,7 @@ function StatusDot({ color }) {
   )
 }
 
-export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme }) {
+export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, server }) {
   const isDark = theme === 'dark'
   const textColor = isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'
   const textHover = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.9)'
@@ -73,6 +73,7 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme }
   const [ping, setPing] = useState(-1)
   const [net, setNet] = useState({ rxSpeed: 0, txSpeed: 0 })
   const [serverCount, setServerCount] = useState(0)
+  const [serverNet, setServerNet] = useState({ rxSpeed: 0, txSpeed: 0 })
 
   useEffect(() => {
     if (!isElectron) return
@@ -94,6 +95,25 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme }
     }, 2000)
     return () => clearInterval(interval)
   }, [])
+
+  const serverId = server?.id || null
+
+  useEffect(() => {
+    if (!isElectron || !serverId) {
+      setServerNet({ rxSpeed: 0, txSpeed: 0 })
+      return
+    }
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const n = await window.electronAPI.getServerNetworkStats(serverId)
+        if (!cancelled && n?.ok) setServerNet({ rxSpeed: n.rxSpeed, txSpeed: n.txSpeed })
+      } catch {}
+    }
+    tick()
+    const interval = setInterval(tick, 2000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [serverId])
 
   const handleMinimize = () => isElectron && window.electronAPI.minimizeWindow()
   const handleClose = () => {
@@ -188,14 +208,14 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme }
               </span>
             </div>
 
-            {serverCount > 0 && (
+            {(serverId || serverCount > 0) && (
               <>
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
                   <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
                     <path d="M12 19V5M5 12l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                   <span className="text-[10px] font-medium" style={{ color: '#22c55e' }}>
-                    {formatSpeed(net.rxSpeed)}
+                    {formatSpeed(serverId ? serverNet.rxSpeed : net.rxSpeed)}
                   </span>
                 </div>
 
@@ -204,7 +224,7 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme }
                     <path d="M12 5v14M19 12l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                   <span className="text-[10px] font-medium" style={{ color: '#f59e0b' }}>
-                    {formatSpeed(net.txSpeed)}
+                    {formatSpeed(serverId ? serverNet.txSpeed : net.txSpeed)}
                   </span>
                 </div>
               </>

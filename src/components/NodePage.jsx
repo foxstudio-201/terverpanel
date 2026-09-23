@@ -777,7 +777,7 @@ function NodePage({ theme, lang }) {
                   else addToast(lang === 'vi' ? 'Gỡ PostgreSQL thất bại' : 'PostgreSQL uninstall failed', 'error')
                 }
               )
-            }} onStart={() => {}} onStop={() => {            }} installing={dbInstalling} uninstalling={false} progress={dbProgress} log={dbLog} logPlaceholder={database?.installed ? (database?.running ? (lang === 'vi' ? 'PostgreSQL đang chạy.' : 'PostgreSQL running.') : (lang === 'vi' ? 'PostgreSQL đã cài, chưa chạy.' : 'PostgreSQL installed, not running.')) : (lang === 'vi' ? 'Chưa cài đặt.' : 'Not installed.')} copiedKey={copiedKey} copyKey="db-status" onCopy={() => copy('db-status', dbLog)} />
+            }} onStart={() => {}} onStop={() => {}} installing={false} uninstalling={false} progress={null} log={dbLog} logPlaceholder={database?.installed ? (database?.running ? (lang === 'vi' ? 'PostgreSQL đang chạy.' : 'PostgreSQL running.') : (lang === 'vi' ? 'PostgreSQL đã cài, chưa chạy.' : 'PostgreSQL installed, not running.')) : (lang === 'vi' ? 'Chưa cài đặt.' : 'Not installed.')} copiedKey={copiedKey} copyKey="db-status" onCopy={() => copy('db-status', dbLog)} />
           </div>
         )}
 

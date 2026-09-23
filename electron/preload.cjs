@@ -93,6 +93,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   wingsCreateServer: (uuid) => ipcRenderer.invoke('wings:server:create', uuid),
   wingsListServers: () => ipcRenderer.invoke('wings:servers:list'),
 
+  // Schedules
+  scheduleList: (serverId) => ipcRenderer.invoke('schedule:list', serverId),
+  scheduleCreate: (serverId, data) => ipcRenderer.invoke('schedule:create', serverId, data),
+  scheduleUpdate: (scheduleId, data) => ipcRenderer.invoke('schedule:update', scheduleId, data),
+  scheduleDelete: (scheduleId) => ipcRenderer.invoke('schedule:delete', scheduleId),
+  scheduleToggle: (scheduleId, isActive) => ipcRenderer.invoke('schedule:toggle', scheduleId, isActive),
+  scheduleRun: (scheduleId) => ipcRenderer.invoke('schedule:run', scheduleId),
+  schedulePreview: (cron) => ipcRenderer.invoke('schedule:preview', cron),
+  onScheduleUpdate: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('schedule:update', handler)
+    return () => { ipcRenderer.removeListener('schedule:update', handler) }
+  },
+  onScheduleDeleted: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('schedule:deleted', handler)
+    return () => { ipcRenderer.removeListener('schedule:deleted', handler) }
+  },
+  onScheduleRan: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('schedule:ran', handler)
+    return () => { ipcRenderer.removeListener('schedule:ran', handler) }
+  },
+
   // Server lifecycle
   installServer: (serverId) => ipcRenderer.invoke('server:install', serverId),
   startGameServer: (serverId) => ipcRenderer.invoke('server:start', serverId),
@@ -127,6 +151,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, data) => callback(data)
     ipcRenderer.on('server:log-reset', handler)
     return () => { ipcRenderer.removeListener('server:log-reset', handler) }
+  },
+
+  onServerBootLine: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:boot-line', handler)
+    return () => { ipcRenderer.removeListener('server:boot-line', handler) }
   },
   serverGetLogs: (serverId) => ipcRenderer.invoke('server:getLogs', serverId),
 
