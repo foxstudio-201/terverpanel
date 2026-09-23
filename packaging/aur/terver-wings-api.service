@@ -1,0 +1,16 @@
+[Unit]
+Description=Terver Panel Wings API Server (port 6543)
+After=network.target
+Before=lunarspace-wings.service
+
+[Service]
+Type=simple
+User=neo
+ExecStart=/usr/bin/node /opt/TerverPanel/electron/wings-api-server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=NODE_PATH=/opt/TerverPanel/electron/node_modules
+
+[Install]
+WantedBy=multi-user.target

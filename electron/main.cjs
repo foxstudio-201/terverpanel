@@ -1,11 +1,12 @@
 // TerverPanel - Electron Main Process
 // Gaming Hosting Launcher for Minecraft
 
-const { app, BrowserWindow, ipcMain, nativeImage, Tray, Menu, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, nativeImage, Tray, Menu, shell, clipboard } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const os = require('os')
+const { spawn, spawnSync } = require('child_process')
 
 const isDev = process.env.NODE_ENV === 'development'
 
@@ -157,6 +158,193 @@ function listServerConfigs() {
   const db = readDB()
   return db.servers || []
 }
+
+function updateServerConfig(id, updates) {
+  const db = readDB()
+  db.servers = (db.servers || []).map(s => s.id === id ? { ...s, ...updates } : s)
+  writeDB(db)
+  return db.servers.find(s => s.id === id) || null
+}
+
+function getServerByUuid(uuid) {
+  const db = readDB()
+  return (db.servers || []).find(s => s.id === uuid || s.uuid === uuid) || null
+}
+
+function appendServerHistory(serverId, action) {
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server) return
+    const history = Array.isArray(server.history) ? server.history : []
+    const now = Date.now()
+    const last = history[0]
+    if (last && last.action === action) {
+      if (action === 'start' || action === 'stop' || action === 'kill') return
+      if (now - (last.at || 0) < 3000) return
+    }
+    const next = [{ at: now, action }, ...history].slice(0, 20)
+    updateServerConfig(serverId, { history: next })
+  } catch {}
+}
+
+function dedupeServerHistory(history) {
+  if (!Array.isArray(history)) return []
+  const out = []
+  for (const item of history) {
+    if (out[0] && out[0].action === item.action &&
+        (item.action === 'start' || item.action === 'stop' || item.action === 'kill')) {
+      continue
+    }
+    // Drop false "start" that status polling wrote right after a stop/kill
+    if (item.action === 'start' && out[0] &&
+        (out[0].action === 'stop' || out[0].action === 'kill') &&
+        (item.at || 0) - (out[0].at || 0) < 3000) {
+      continue
+    }
+    out.push(item)
+  }
+  return out
+}
+
+function cleanServerHistoryOnDisk(serverId) {
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server || !Array.isArray(server.history) || server.history.length === 0) return
+    const cleaned = dedupeServerHistory(server.history)
+    if (cleaned.length !== server.history.length) {
+      updateServerConfig(serverId, { history: cleaned.slice(0, 20) })
+    }
+  } catch {}
+}
+
+const _serverTps = new Map()
+const _tpsPollers = new Map()
+
+function clampTps(n) {
+  if (!Number.isFinite(n) || n < 0) return null
+  if (n > 20.5) return 20
+  return Math.round(n * 100) / 100
+}
+
+function parseTpsFromText(text) {
+  if (!text) return null
+  const t = String(text)
+
+  let m = t.match(/TPS from last[\s\S]{0,300}?\*?\s*([\d]+(?:\.[\d]+)?)\s*,\s*([\d]+(?:\.[\d]+)?)\s*,\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) return clampTps(parseFloat(m[1]))
+
+  m = t.match(/TPS from last[^:\n]*:\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) return clampTps(parseFloat(m[1]))
+
+  m = t.match(/\bavg\s+TPS\s*[:=]?\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) return clampTps(parseFloat(m[1]))
+
+  m = t.match(/\bTPS\s*[:=]\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) return clampTps(parseFloat(m[1]))
+
+  m = t.match(/([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)/)
+  if (m) {
+    const a = parseFloat(m[1])
+    if (a >= 0 && a <= 20.5) return clampTps(a)
+  }
+
+  m = t.match(/\bMSPT\s*[:=]?\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) {
+    const mspt = parseFloat(m[1])
+    if (mspt > 0 && mspt < 5000) return clampTps(1000 / mspt)
+  }
+
+  return null
+}
+
+function setServerTps(serverId, tps) {
+  const v = clampTps(tps)
+  if (v == null) return false
+  const prev = _serverTps.get(serverId)
+  if (prev && Math.abs(prev.tps - v) < 0.05 && Date.now() - prev.at < 15000) {
+    prev.at = Date.now()
+    return true
+  }
+  _serverTps.set(serverId, { tps: v, at: Date.now() })
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server || Math.abs((server.lastTps || 0) - v) >= 0.05) {
+      updateServerConfig(serverId, { lastTps: v, lastTpsAt: Date.now() })
+    }
+  } catch {}
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('server:tps', { serverId, tps: v, at: Date.now() })
+  }
+  return true
+}
+
+function ingestTpsLine(serverId, line) {
+  if (!line) return
+  const tps = parseTpsFromText(line)
+  if (tps != null) setServerTps(serverId, tps)
+}
+
+function clearServerTps(serverId) {
+  _serverTps.delete(serverId)
+}
+
+function stopTpsPoller(serverId) {
+  const t = _tpsPollers.get(serverId)
+  if (t) {
+    clearInterval(t)
+    _tpsPollers.delete(serverId)
+  }
+}
+
+async function sendTpsProbe(serverId) {
+  const cmds = ['spark tps', 'tps']
+  for (const cmd of cmds) {
+    try {
+      const sent = sendWingsWs(serverId, 'send command', [cmd])
+      if (sent) return
+    } catch {}
+  }
+  try {
+    await wingsApiCall('POST', `/api/servers/${serverId}/commands`, { commands: ['spark tps'] })
+  } catch {}
+}
+
+function startTpsPoller(serverId) {
+  if (_tpsPollers.has(serverId)) return
+  const iv = setInterval(() => { sendTpsProbe(serverId).catch(() => {}) }, 8000)
+  _tpsPollers.set(serverId, iv)
+  setTimeout(() => { sendTpsProbe(serverId).catch(() => {}) }, 2500)
+}
+
+function stopTpsPollerFor(serverId) {
+  stopTpsPoller(serverId)
+}
+
+async function ensureSparkPlugin(server) {
+  try {
+    const egg = String(server?.eggId || '').split('/').pop().toLowerCase()
+    if (!['paper', 'purpur', 'spigot'].includes(egg)) return false
+    const serverDir = path.join(WINGS_DATA_DIR, server.id)
+    const pluginsDir = path.join(serverDir, 'plugins')
+    const sparkPath = path.join(pluginsDir, 'spark.jar')
+    if (fs.existsSync(sparkPath) && fs.statSync(sparkPath).size > 1000) return true
+    fs.mkdirSync(pluginsDir, { recursive: true })
+    sendServerLog(server.id, '[TPS] Downloading Spark plugin for real TPS...')
+    await downloadFile('https://spark.lucko.me/download', sparkPath)
+    sendServerLog(server.id, '[TPS] Spark installed — TPS will appear after server starts')
+    return true
+  } catch (err) {
+    try { sendServerLog(server.id, `[TPS] Spark install failed: ${err.message}`) } catch {}
+    return false
+  }
+}
+
+function getSettings() {
+  const db = readDB()
+  return db.settings || {}
+}
+
+const WINGS_DATA_DIR = path.join(app.getPath('appData'), '.TerverPanel', 'wings', 'servers')
 
 function resolveIconPath() {
   const devPath = path.join(__dirname, '../public/icon.ico')
@@ -317,6 +505,16 @@ ipcMain.on('quit-app', () => {
 ipcMain.handle('app:version', (e) => {
   if (!getTrustedWindow(e)) return null
   return app.getVersion()
+})
+
+ipcMain.handle('clipboard:write', (e, text) => {
+  if (!getTrustedWindow(e)) return { ok: false, error: 'Unauthorized' }
+  try {
+    clipboard.writeText(String(text ?? ''))
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
 })
 
 ipcMain.handle('app:openExternal', (e, url) => {
@@ -510,17 +708,1011 @@ ipcMain.handle('server:getConfigs', (e) => {
   return { ok: true, servers: listServerConfigs() }
 })
 
-ipcMain.handle('server:addConfig', (e, serverConfig) => {
+ipcMain.handle('server:getConfig', (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+  return { ok: true, server }
+})
+
+function ensureEula(serverId) {
+  try {
+    const dir = path.join(WINGS_DATA_DIR, serverId)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o755 })
+    const p = path.join(dir, 'eula.txt')
+    let needWrite = true
+    if (fs.existsSync(p)) {
+      const cur = fs.readFileSync(p, 'utf8')
+      needWrite = !/eula\s*=\s*true/i.test(cur)
+    }
+    if (needWrite) {
+      fs.writeFileSync(p, '#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA)\neula=true\n')
+      return true
+    }
+  } catch {}
+  return false
+}
+
+function requiredJavaForVersion(raw) {
+  const low = String(raw || '').trim().toLowerCase()
+  if (!low || low === 'latest' || low === 'snapshot') return 0
+  const m = low.match(/^(\d+)\.(\d+)/)
+  if (m) {
+    const major = parseInt(m[1], 10)
+    const minor = parseInt(m[2], 10)
+    if (major >= 25) return 25
+    if (major === 1) {
+      if (minor > 21) return 25
+      if (minor === 21) {
+        const patch = parseInt((low.split('.')[2] || '0').replace(/\D.*/, ''), 10) || 0
+        return patch >= 9 ? 25 : 21
+      }
+      if (minor === 20) {
+        const patch = parseInt((low.split('.')[2] || '0').replace(/\D.*/, ''), 10) || 0
+        return patch >= 5 ? 21 : 17
+      }
+      if (minor >= 17) return 17
+      if (minor >= 13) return 16
+      return 8
+    }
+    if (major >= 21 && major <= 24) return 21
+  }
+  return 0
+}
+
+function currentJavaFromImage(img) {
+  const m = String(img || '').match(/java[_-](\d+)/i)
+  return m ? parseInt(m[1], 10) : 0
+}
+
+// Resolve Docker image ref from egg key (e.g. "Java 25") or full image path
+function resolveDockerImage(server) {
+  const dockerImage = server.dockerImage || ''
+  if (!dockerImage) return 'ghcr.io/pelican-eggs/yolks:java_21'
+  if (dockerImage.includes('/') && dockerImage.includes(':')) return dockerImage
+  try {
+    const eggId = server.eggId || ''
+    const eggsDir = path.join(__dirname, 'eggs')
+    if (eggId && fs.existsSync(eggsDir)) {
+      const parts = eggId.split('/')
+      const filePath = path.join(eggsDir, parts[0], parts[1] + '.json')
+      if (fs.existsSync(filePath)) {
+        const egg = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+        const dockerImages = egg.docker_images || {}
+        if (dockerImages[dockerImage]) return dockerImages[dockerImage]
+        const m = dockerImage.match(/(\d+)/)
+        if (m) return `ghcr.io/pelican-eggs/yolks:java_${m[1]}`
+      }
+    }
+  } catch {}
+  const m = dockerImage.match(/(\d+)/)
+  if (m && !dockerImage.includes('/')) return `ghcr.io/pelican-eggs/yolks:java_${m[1]}`
+  if (dockerImage.includes(':') || dockerImage.includes('/')) return dockerImage
+  return 'ghcr.io/pelican-eggs/yolks:java_21'
+}
+
+function ensureJava(serverId) {
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server) return null
+    const eggId = server.eggId || ''
+    if (!eggId || !eggId.startsWith('minecraft/')) return null
+    const ver = (server.config && (server.config.MINECRAFT_VERSION || server.config.MC_VERSION || server.config.DL_VERSION || server.config.VANILLA_VERSION)) || server.version || ''
+    const need = requiredJavaForVersion(ver)
+    if (!need) return null
+    const resolved = resolveDockerImage(server)
+    const have = currentJavaFromImage(resolved)
+    if (have >= need) return null
+    const next = `ghcr.io/pelican-eggs/yolks:java_${need}`
+    updateServerConfig(serverId, { dockerImage: next })
+    return { from: resolved, to: next, need }
+  } catch { return null }
+}
+
+function runProc(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(result)
+    }
+    let proc
+    try {
+      proc = spawn(cmd, args, { env: process.env, ...opts })
+    } catch (err) {
+      finish({ status: 1, stdout, stderr: err.message })
+      return
+    }
+    const timer = opts.timeout
+      ? setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch {}
+          finish({ status: 124, stdout, stderr: stderr + '\ntimeout' })
+        }, opts.timeout)
+      : null
+    if (proc.stdout) proc.stdout.on('data', (d) => { stdout += d.toString() })
+    if (proc.stderr) proc.stderr.on('data', (d) => { stderr += d.toString() })
+    proc.on('close', (code) => finish({ status: code ?? 1, stdout, stderr }))
+    proc.on('error', (err) => finish({ status: 1, stdout, stderr: err.message }))
+  })
+}
+
+ipcMain.handle('server:addConfig', async (e, serverConfig) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   const server = { id: generateUUID(), ...serverConfig, createdAt: new Date().toISOString() }
   addServerConfig(server)
+  const serverDir = path.join(WINGS_DATA_DIR, server.id)
+  if (!fs.existsSync(serverDir)) {
+    fs.mkdirSync(serverDir, { recursive: true, mode: 0o755 })
+  }
+  ensureEula(server.id)
+  ensureJava(server.id)
+  syncServerToWings(server.id).catch(() => {})
   return { ok: true, server }
 })
 
 ipcMain.handle('server:removeConfig', (e, id) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   removeServerConfig(id)
+  const serverDir = path.join(WINGS_DATA_DIR, id)
+  if (fs.existsSync(serverDir)) {
+    try {
+      fs.rmSync(serverDir, { recursive: true, force: true })
+    } catch {
+      try {
+        const dockerBin = '/home/neo/.config/.TerverPanel/docker/bin/docker'
+        spawnSync(dockerBin, ['run', '--rm', '-v', `${path.dirname(serverDir)}:/mnt/servers`, 'alpine', 'rm', '-rf', `/mnt/servers/${id}`], { timeout: 15000 })
+      } catch {}
+      if (fs.existsSync(serverDir)) {
+        spawnSync('rm', ['-rf', serverDir], { timeout: 15000 })
+      }
+      if (fs.existsSync(serverDir)) {
+        sudoExec(`rm -rf "${serverDir}"`)
+      }
+    }
+  }
+  try { wingsApiCall('DELETE', `/api/servers/${id}`).catch(() => {}) } catch {}
   return { ok: true }
+})
+
+function sendServerProgress(serverId, percent, message) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('server:progress', { serverId, percent, message })
+  }
+}
+
+function sendServerLog(serverId, message) {
+  let msg = String(message ?? '')
+  msg = msg
+    .replace(/\[Calagopus Daemon\]/g, '[Terver Daemon]')
+    .replace(/\[Calagopus\]/g, '[Terver]')
+    .replace(/Calagopus Daemon/g, 'Terver Daemon')
+    .replace(/calagopus daemon/gi, 'Terver Daemon')
+    .replace(/container@calagopus~/g, 'container@terver')
+    .replace(/@calagopus~/g, '@terver')
+  const entry = { serverId, message: msg, timestamp: Date.now() }
+  if (!global._serverLogs) global._serverLogs = {}
+  if (!global._serverLogs[serverId]) global._serverLogs[serverId] = []
+  global._serverLogs[serverId].push(entry)
+  if (global._serverLogs[serverId].length > 500) global._serverLogs[serverId] = global._serverLogs[serverId].slice(-500)
+  persistServerLogs(serverId)
+  ingestTpsLine(serverId, message)
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('server:log', entry)
+  }
+}
+
+function serverLogsPath(serverId) {
+  return path.join(APP_DATA_DIR, 'server-logs', `${serverId}.json`)
+}
+
+function persistServerLogs(serverId) {
+  try {
+    const dir = path.join(APP_DATA_DIR, 'server-logs')
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const logs = (global._serverLogs && global._serverLogs[serverId]) || []
+    fs.writeFileSync(serverLogsPath(serverId), JSON.stringify(logs))
+  } catch {}
+}
+
+function loadServerLogsFromDisk(serverId) {
+  try {
+    const p = serverLogsPath(serverId)
+    if (!fs.existsSync(p)) return []
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'))
+    return Array.isArray(data) ? data : []
+  } catch { return [] }
+}
+
+function getServerLogs(serverId) {
+  const mem = (global._serverLogs && global._serverLogs[serverId]) || []
+  if (mem.length) return mem
+  return loadServerLogsFromDisk(serverId)
+}
+
+function clearServerLogs(serverId) {
+  if (global._serverLogs) global._serverLogs[serverId] = []
+  try {
+    const p = serverLogsPath(serverId)
+    if (fs.existsSync(p)) fs.unlinkSync(p)
+  } catch {}
+}
+
+function emitLogReset(serverId) {
+  clearServerLogs(serverId)
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('server:log-reset', { serverId })
+  }
+}
+
+ipcMain.handle('server:getLogs', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  return { ok: true, logs: getServerLogs(serverId) }
+})
+
+
+let cloudflaredProcess = null
+
+function restartWings() {
+  try {
+    const result = sudoExec('systemctl restart lunarspace-wings.service')
+    if (result.ok) {
+      console.log('[Wings] Restarted successfully')
+      return true
+    }
+    console.error('[Wings] Restart failed:', result.error)
+    return false
+  } catch {
+    return false
+  }
+}
+
+function downloadFile(url, destPath, onProgress) {
+  return new Promise((resolve, reject) => {
+    const https = url.startsWith('https') ? require('https') : require('http')
+    const file = fs.createWriteStream(destPath)
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close()
+        fs.unlinkSync(destPath)
+        return downloadFile(res.headers.location, destPath, onProgress).then(resolve).catch(reject)
+      }
+      if (res.statusCode !== 200) {
+        file.close()
+        fs.unlinkSync(destPath)
+        return reject(new Error(`HTTP ${res.statusCode}`))
+      }
+      const totalBytes = parseInt(res.headers['content-length'], 10) || 0
+      let downloaded = 0
+      res.on('data', (chunk) => {
+        downloaded += chunk.length
+        if (totalBytes > 0 && onProgress) onProgress(downloaded, totalBytes)
+      })
+      res.pipe(file)
+      file.on('finish', () => { file.close(); resolve() })
+      file.on('error', (err) => { fs.unlinkSync(destPath); reject(err) })
+    }).on('error', (err) => { file.close(); if (fs.existsSync(destPath)) fs.unlinkSync(destPath); reject(err) })
+  })
+}
+
+function ensureWingsWs(serverId) {
+  const entry = _wingsWs.get(serverId)
+  if (entry && entry.connected && entry.authenticated) return
+  try { connectWingsWs(serverId, {}) } catch {}
+}
+
+function sendFinalLogSnapshot(serverId) {
+  // Do not dump full history after stop — it re-injects previous session into console.
+}
+
+const _stopCleanups = new Map()
+
+function cancelStopCleanup(serverId) {
+  const t = _stopCleanups.get(serverId)
+  if (t) {
+    clearInterval(t)
+    _stopCleanups.delete(serverId)
+  }
+}
+
+function scheduleStopCleanup(serverId, delayMs = 8000) {
+  cancelStopCleanup(serverId)
+  const started = Date.now()
+  const gen = (global._logGen && global._logGen[serverId]) || 0
+  const timer = setInterval(async () => {
+    if ((global._logGen && global._logGen[serverId]) !== gen) {
+      clearInterval(timer)
+      _stopCleanups.delete(serverId)
+      return
+    }
+    let state = 'unknown'
+    try {
+      const data = await wingsApiCall('GET', `/api/servers/${serverId}`)
+      state = data?.state || 'unknown'
+    } catch {}
+    const done = state === 'offline' || state === 'stopped' || Date.now() - started > delayMs
+    if (!done) return
+    clearInterval(timer)
+    if (_stopCleanups.get(serverId) === timer) _stopCleanups.delete(serverId)
+    if ((global._logGen && global._logGen[serverId]) !== gen) return
+    closeWingsWs(serverId, { reconnect: false })
+    stopLogStream(serverId)
+    updateServerConfig(serverId, { status: 'stopped' })
+  }, 700)
+}
+
+ipcMain.handle('server:install', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  updateServerConfig(server.id, { status: 'installing' })
+  sendServerProgress(server.id, 0, 'Preparing server directory...')
+  if (!global._logGen) global._logGen = {}
+  global._logGen[server.id] = (global._logGen[server.id] || 0) + 1
+  cancelStopCleanup(server.id)
+  emitLogReset(server.id)
+  stopLogStream(server.id)
+  sendServerLog(server.id, `[Install] Starting installation for ${server.name}...`)
+  startLogStream(server.id, { boot: true, baseline: true })
+  ensureWingsWs(server.id)
+
+  try {
+    const serverDir = path.join(WINGS_DATA_DIR, server.id)
+    if (!fs.existsSync(serverDir)) {
+      fs.mkdirSync(serverDir, { recursive: true, mode: 0o755 })
+      sendServerLog(server.id, `[Install] Created server directory: ${serverDir}`)
+    } else {
+      sendServerLog(server.id, `[Install] Server directory: ${serverDir}`)
+    }
+
+    const dockerBin = '/home/neo/.config/.TerverPanel/docker/bin/docker'
+    const uid = os.userInfo().uid
+    const gid = os.userInfo().gid
+    try {
+      const inspectAlpine = await runProc(dockerBin, ['inspect', 'alpine'], { timeout: 5000 })
+      if (inspectAlpine.status !== 0) {
+        sendServerLog(server.id, `[Install] Pulling alpine image...`)
+        await runProc(dockerBin, ['pull', 'alpine'], { timeout: 60000 })
+      }
+      sendServerLog(server.id, `[Install] Cleaning server directory...`)
+      await runProc(dockerBin, ['run', '--rm', '-v', `${serverDir}:/mnt/server`, 'alpine', 'sh', '-c', 'rm -rf /mnt/server/* /mnt/server/.[!.]* 2>/dev/null; chown -R ' + uid + ':' + gid + ' /mnt/server'], { timeout: 30000 })
+      sendServerLog(server.id, `[Install] Directory cleaned and ownership fixed`)
+      ensureEula(server.id)
+      const javaFixed2 = ensureJava(server.id)
+      if (javaFixed2) sendServerLog(server.id, `[Install] Using Docker image ${javaFixed2.to} (needs Java ${javaFixed2.need})`)
+    } catch (err) {
+      sendServerLog(server.id, `[Install] WARNING: Docker cleanup failed: ${err.message}`)
+    }
+
+    const eggName = (server.eggId || 'paper').split('/').pop()
+    const eggJsonPath = path.join(__dirname, 'eggs', 'minecraft', eggName + '.json')
+    let eggData = null
+    try {
+      eggData = JSON.parse(fs.readFileSync(eggJsonPath, 'utf8'))
+    } catch {
+      sendServerLog(server.id, `[Install] WARNING: Could not load egg JSON from ${eggJsonPath}`)
+    }
+
+    const eggConfig = server.config || {}
+    const jarFile = eggConfig.SERVER_JARFILE || 'server.jar'
+    const jarPath = path.join(serverDir, jarFile)
+
+    if (eggData && eggData.scripts && eggData.scripts.installation) {
+      const install = eggData.scripts.installation
+      const installerContainer = install.container || 'ghcr.io/pelican-eggs/installers:alpine'
+      const entrypoint = install.entrypoint || 'ash'
+      const installScript = install.script
+
+      sendServerProgress(server.id, 5, `Running install script in Docker...`)
+      sendServerLog(server.id, `[Install] Egg: ${eggData.name || eggName}`)
+      sendServerLog(server.id, `[Install] Installer container: ${installerContainer}`)
+
+      const envVars = []
+      const eggVariables = eggData.variables || []
+      for (const v of eggVariables) {
+        const envName = v.env_variable
+        let value = ''
+        if (envName === 'SERVER_JARFILE') value = jarFile
+        else if (envName === 'MC_VERSION' || envName === 'MINECRAFT_VERSION' || envName === 'VANILLA_VERSION' || envName === 'DL_VERSION') {
+          value = eggConfig[envName] || server.version || v.default_value || 'latest'
+        }
+        else if (envName === 'BUILD_NUMBER') value = eggConfig[envName] || v.default_value || 'latest'
+        else if (envName === 'FORGE_VERSION') value = eggConfig[envName] || ''
+        else if (envName === 'FABRIC_VERSION' || envName === 'LOADER_VERSION') value = eggConfig[envName] || v.default_value || 'latest'
+        else if (envName === 'BUILD_TYPE') value = eggConfig[envName] || v.default_value || 'recommended'
+        else if (envName === 'DL_PATH') value = eggConfig[envName] || ''
+        else value = eggConfig[envName] || v.default_value || ''
+        envVars.push('-e', `${envName}=${value}`)
+      }
+
+      const dockerCheck = await runProc(dockerBin, ['inspect', installerContainer], { timeout: 10000 })
+      if (dockerCheck.status !== 0) {
+        sendServerLog(server.id, `[Install] Pulling installer image: ${installerContainer}`)
+        const pullProc = await runProc(dockerBin, ['pull', installerContainer], { timeout: 120000 })
+        if (pullProc.status !== 0) {
+          throw new Error(`Failed to pull installer image: ${pullProc.stderr?.toString() || ''}`)
+        }
+        sendServerLog(server.id, `[Install] Installer image pulled successfully`)
+      }
+
+      const scriptPath = path.join(serverDir, '_install.sh')
+      fs.writeFileSync(scriptPath, installScript, { mode: 0o755 })
+
+      const dockerArgs = [
+        'run', '--rm',
+        '--user', `${os.userInfo().uid}:${os.userInfo().gid}`,
+        '-v', `${serverDir}:/mnt/server`,
+        '-v', `${scriptPath}:/tmp/install.sh:ro`,
+        ...envVars,
+        '--entrypoint', entrypoint,
+        installerContainer, '/tmp/install.sh'
+      ]
+
+      sendServerLog(server.id, `[Install] Starting installer container...`)
+
+      await new Promise((resolve, reject) => {
+        const proc = spawn(dockerBin, dockerArgs, { env: process.env })
+        let stderr = ''
+
+        proc.stdout.on('data', (data) => {
+          const lines = data.toString().split('\n').filter(l => l.trim())
+          lines.forEach(line => {
+            sendServerLog(server.id, `[Install] ${line}`)
+          })
+        })
+
+        proc.stderr.on('data', (data) => {
+          const lines = data.toString().split('\n').filter(l => l.trim())
+          lines.forEach(line => {
+            sendServerLog(server.id, `[Install] ${line}`)
+          })
+          stderr += data.toString()
+        })
+
+        proc.on('close', (code) => {
+          try { fs.unlinkSync(scriptPath) } catch {}
+          if (code === 0) {
+            sendServerProgress(server.id, 85, 'Install script completed')
+            sendServerLog(server.id, '[Install] Install script completed successfully')
+            resolve()
+          } else {
+            reject(new Error(`Install script exited with code ${code}: ${stderr.slice(-300)}`))
+          }
+        })
+
+        proc.on('error', (err) => {
+          try { fs.unlinkSync(scriptPath) } catch {}
+          reject(new Error(`Failed to run Docker: ${err.message}`))
+        })
+      })
+    } else {
+      sendServerLog(server.id, '[Install] No install script in egg, using direct download...')
+      if (server.jarUrl) {
+        sendServerProgress(server.id, 5, `Downloading ${jarFile}...`)
+        sendServerLog(server.id, `[Install] Download URL: ${server.jarUrl}`)
+        await downloadFile(server.jarUrl, jarPath, (downloaded, total) => {
+          const pct = Math.round((downloaded / total) * 80) + 5
+          const dlMB = (downloaded / 1048576).toFixed(1)
+          const totalMB = (total / 1048576).toFixed(1)
+          sendServerProgress(server.id, pct, `Downloading ${jarFile}... ${dlMB}/${totalMB} MB`)
+          if (pct % 20 === 0 || pct >= 80) {
+            sendServerLog(server.id, `[Install] Downloaded ${dlMB}/${totalMB} MB (${pct}%)`)
+          }
+        })
+        sendServerProgress(server.id, 85, 'Download complete')
+        sendServerLog(server.id, `[Install] Download complete: ${jarFile}`)
+      } else {
+        sendServerLog(server.id, '[Install] No jar URL provided, skipping download')
+      }
+    }
+
+    sendServerProgress(server.id, 88, 'Writing eula.txt...')
+    sendServerLog(server.id, '[Install] Writing eula.txt')
+    ensureEula(server.id)
+    const javaFixedInstall = ensureJava(server.id)
+    if (javaFixedInstall) sendServerLog(server.id, `[Install] Using Docker image ${javaFixedInstall.to} (needs Java ${javaFixedInstall.need})`)
+
+    if (eggName === 'forge') {
+      const forgeArgsGlob = fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge')).flatMap(dir => {
+        try { return fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', dir)).map(sub => path.join(dir, sub)) } catch { return [] }
+      }).find(d => { try { return fs.statSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', d, 'unix_args.txt')).isFile() } catch { return false } })
+      if (forgeArgsGlob) {
+        const src = path.join('libraries', 'net', 'minecraftforge', forgeArgsGlob, 'unix_args.txt')
+        const dest = path.join(serverDir, 'unix_args.txt')
+        if (!fs.existsSync(dest)) {
+          fs.copyFileSync(path.join(serverDir, src), dest)
+          sendServerLog(server.id, `[Install] Created unix_args.txt symlink from ${src}`)
+        }
+        const serverJarCandidates = fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', forgeArgsGlob)).filter(f => f.endsWith('-server.jar'))
+        if (serverJarCandidates.length > 0 && !fs.existsSync(path.join(serverDir, jarFile))) {
+          fs.copyFileSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', forgeArgsGlob, serverJarCandidates[0]), path.join(serverDir, jarFile))
+          sendServerLog(server.id, `[Install] Created ${jarFile} from ${serverJarCandidates[0]}`)
+        }
+      } else {
+        sendServerLog(server.id, '[Install] WARNING: Could not find Forge unix_args.txt in libraries')
+      }
+    }
+
+    const port = server.port || 25565
+    sendServerProgress(server.id, 92, 'Writing server.properties...')
+    sendServerLog(server.id, `[Install] Writing server.properties (port: ${port})`)
+    const props = [
+      'server-port=' + port,
+      'query.port=' + port,
+      'server-ip=',
+      'level-name=world',
+      'gamemode=survival',
+      'difficulty=easy',
+      'max-players=20',
+      'online-mode=true',
+      'enable-query=true',
+      'eula=true',
+    ].join('\n')
+    fs.writeFileSync(path.join(serverDir, 'server.properties'), props + '\n')
+
+    sendServerProgress(server.id, 98, 'Finalizing...')
+    sendServerLog(server.id, '[Install] Finalizing installation...')
+    updateServerConfig(server.id, {
+      status: 'stopped',
+      installedAt: new Date().toISOString(),
+      serverDir,
+    })
+
+    sendServerProgress(server.id, 100, 'Installation complete!')
+    sendServerLog(server.id, '[Install] Installation complete! Server is ready to start.')
+    appendServerHistory(server.id, 'install')
+    await ensureSparkPlugin(server).catch(() => {})
+    sendServerLog(server.id, '[Install] Syncing server to Wings daemon...')
+    await syncServerToWings(server.id)
+    const freshServer = getServerByUuid(server.id)
+    return { ok: true, server: freshServer }
+  } catch (err) {
+    updateServerConfig(server.id, { status: 'error', installError: err.message })
+    sendServerProgress(server.id, 0, 'Installation failed: ' + err.message)
+    sendServerLog(server.id, `[Install] ERROR: ${err.message}`)
+    return { ok: false, error: err.message }
+  }
+})
+
+// Stream Wings console logs to renderer while a server is active
+const _activeLogStreams = new Map()
+
+function stopLogStream(serverId) {
+  const t = _activeLogStreams.get(serverId)
+  if (!t) return
+  if (typeof t === 'object' && typeof t.stop === 'function') {
+    t.stop()
+  } else {
+    try { clearInterval(t) } catch {}
+  }
+  _activeLogStreams.delete(serverId)
+}
+
+async function fetchWingsLogs(uuid, lines = 500) {
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const resp = await fetch(`http://127.0.0.1:8080/api/servers/${uuid}/logs?lines=${lines}`, {
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'text/plain, application/json' },
+      timeout: 6000,
+    })
+    if (!resp.ok) return null
+    const text = await resp.text()
+    try {
+      const json = JSON.parse(text)
+      if (typeof json === 'string') return json
+      if (json && typeof json.logs === 'string') return json.logs
+      if (json && typeof json.data === 'string') return json.data
+      if (json && Array.isArray(json.lines)) return json.lines.join('\n')
+      if (json && Array.isArray(json.data)) return json.data.join('\n')
+    } catch {}
+    return text || null
+  } catch { return null }
+}
+
+function getContainerHostHint(server) {
+  // Wings sets container hostname; short uuid is common fallback
+  const name = (server?.name || 'container').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 16) || 'container'
+  const short = String(server?.id || '').slice(0, 8)
+  return name || short || 'container'
+}
+
+// ─── Wings WebSocket client (real-time console like Calagopus) ─────
+const { WebSocket } = require('ws')
+const _wingsWs = new Map() // serverId -> { ws, jwt, serverId, connected, authenticated }
+
+function signWingsWsJwt(serverUuid) {
+  const jwt = require('jsonwebtoken')
+  const tokenData = getWingsLocalToken()
+  const secret = tokenData?.token
+  if (!secret) throw new Error('Wings token not found')
+  const now = Math.floor(Date.now() / 1000)
+  const payload = {
+    scope: 'websocket',
+    iss: 'panel',
+    aud: [],
+    exp: now + 600,
+    iat: now,
+    jti: '00000000-0000-0000-0000-000000000001',
+    user_uuid: '00000000-0000-0000-0000-000000000001',
+    user_name: 'terver',
+    server_uuid: serverUuid,
+    permissions: [
+      'websocket.connect',
+      'control.read-console',
+      'control.console',
+      'control.start',
+      'control.stop',
+      'control.restart',
+      'admin.websocket.errors',
+      'admin.websocket.install',
+      'admin.websocket.transfer',
+      'backup.read',
+      'schedule.read',
+      'file.read',
+      'file.read-content',
+      'file.create',
+      'file.update',
+      'file.delete',
+      'file.archive',
+    ],
+    ignored_files: [],
+  }
+  return jwt.sign(payload, secret, { algorithm: 'HS256' })
+}
+
+function emitWsToRenderer(serverId, event, payload) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('wings:ws-event', { serverId, event, payload })
+  }
+}
+
+function closeWingsWs(serverId, opts = {}) {
+  const entry = _wingsWs.get(serverId)
+  if (entry) {
+    entry.closedByUs = true
+    if (opts.reconnect === false) entry.noReconnect = true
+    try { entry.ws.close(1000, 'client disconnect') } catch {}
+    _wingsWs.delete(serverId)
+  }
+}
+
+function connectWingsWs(serverId, opts = {}) {
+  if (_wingsWs.has(serverId)) closeWingsWs(serverId, { reconnect: false })
+  let jwtToken
+  try { jwtToken = signWingsWsJwt(serverId) } catch (err) {
+    emitWsToRenderer(serverId, 'error', { message: err.message })
+    return { ok: false, error: err.message }
+  }
+
+  const ws = new WebSocket(`ws://127.0.0.1:8080/api/servers/${serverId}/ws`, {
+    headers: { Origin: 'http://127.0.0.1:6543' },
+  })
+  const entry = { ws, serverId, connected: false, authenticated: false }
+  _wingsWs.set(serverId, entry)
+
+  ws.on('open', () => {
+    entry.connected = true
+    ws.send(JSON.stringify({ event: 'auth', args: [jwtToken] }))
+  })
+
+  ws.on('message', (raw) => {
+    let msg
+    try { msg = JSON.parse(raw.toString()) } catch { return }
+    const ev = msg.event
+    const args = msg.args || []
+    if (ev === 'auth success') {
+      entry.authenticated = true
+      // Do NOT replay Wings history on every auth — it dumps previous session into console.
+      ws.send(JSON.stringify({ event: 'send status', args: [] }))
+      emitWsToRenderer(serverId, 'auth success', { permissions: args[0] })
+      return
+    }
+    if (ev === 'ping') { try { ws.send(JSON.stringify({ event: 'pong', args: [] })) } catch {} return }
+    if (ev === 'token expiring' || ev === 'token expired') {
+      try { ws.send(JSON.stringify({ event: 'auth', args: [signWingsWsJwt(serverId)] })) } catch {}
+      return
+    }
+    if (ev === 'console output' || ev === 'install output') {
+      const linesArg = args[0]
+      if (typeof linesArg === 'string') ingestTpsLine(serverId, linesArg)
+      else if (Array.isArray(linesArg)) linesArg.forEach((l) => ingestTpsLine(serverId, l))
+      // Persist WS console lines so history survives app restart while server runs
+      const text = typeof linesArg === 'string' ? linesArg : Array.isArray(linesArg) ? linesArg.join('\n') : ''
+      if (text) {
+        for (const line of text.split('\n')) {
+          if (line) sendServerLog(serverId, line)
+        }
+      } else {
+        emitWsToRenderer(serverId, ev, { lines: args[0] })
+        return
+      }
+      // sendServerLog already emits server:log; also forward as ws-event for console page
+      emitWsToRenderer(serverId, ev, { lines: args[0] })
+      return
+    }
+    if (ev === 'status') {
+      const state = args[0]
+      if (state === 'running') {
+        updateServerConfig(serverId, { status: 'running' })
+        startTpsPoller(serverId)
+      } else if (state === 'starting') updateServerConfig(serverId, { status: 'starting' })
+      else if (state === 'stopping') updateServerConfig(serverId, { status: 'stopping' })
+      else if (state === 'offline' || state === 'stopped') {
+        updateServerConfig(serverId, { status: 'stopped' })
+        stopTpsPoller(serverId)
+        clearServerTps(serverId)
+      }
+      emitWsToRenderer(serverId, 'status', { state })
+      return
+    }
+    if (ev === 'jwt error' || ev === 'daemon error' || ev === 'daemon message') {
+      emitWsToRenderer(serverId, ev, { args })
+      return
+    }
+    emitWsToRenderer(serverId, ev, { args })
+  })
+
+  ws.on('error', (err) => {
+    emitWsToRenderer(serverId, 'error', { message: err.message })
+  })
+
+  ws.on('close', (code, reason) => {
+    entry.connected = false
+    entry.authenticated = false
+    emitWsToRenderer(serverId, 'close', { code, reason: String(reason || '') })
+    if (_wingsWs.get(serverId) === entry) _wingsWs.delete(serverId)
+    const intentional = entry.closedByUs || entry.noReconnect || opts.reconnect === false || code === 1000
+    if (!intentional) {
+      setTimeout(() => { if (!_wingsWs.has(serverId) && !entry.closedByUs && !entry.noReconnect) connectWingsWs(serverId, opts) }, 2000)
+    }
+  })
+
+  return { ok: true }
+}
+
+function sendWingsWs(serverId, event, args = []) {
+  const entry = _wingsWs.get(serverId)
+  if (!entry || !entry.connected || !entry.authenticated) return false
+  try { entry.ws.send(JSON.stringify({ event, args })); return true } catch { return false }
+}
+
+ipcMain.handle('wings:ws-connect', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  return connectWingsWs(serverId, {})
+})
+ipcMain.handle('wings:ws-disconnect', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  closeWingsWs(serverId, { reconnect: false })
+  return { ok: true }
+})
+ipcMain.handle('wings:ws-send', async (e, serverId, event, args) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const ok = sendWingsWs(serverId, event, args || [])
+  return { ok }
+})
+ipcMain.handle('wings:ws-status', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const entry = _wingsWs.get(serverId)
+  return { ok: true, connected: !!entry?.connected, authenticated: !!entry?.authenticated }
+})
+
+function startLogStream(serverId, opts = {}) {
+  stopLogStream(serverId)
+  const server = getServerByUuid(serverId)
+  const hostHint = getContainerHostHint(server)
+  let lastLog = ''
+  let seenLines = new Set()
+  let idleTicks = 0
+  let bootPhase = !!opts.boot
+  let stopped = false
+  let baselineDone = !opts.baseline
+  const bootUntil = Date.now() + (opts.boot ? 45000 : 0)
+  const streamEntry = {
+    stop: () => { stopped = true },
+  }
+  const finish = () => {
+    stopped = true
+    if (_activeLogStreams.get(serverId) === streamEntry) {
+      _activeLogStreams.delete(serverId)
+    }
+  }
+  streamEntry.stop = finish
+  _activeLogStreams.set(serverId, streamEntry)
+
+  const tick = async () => {
+    if (stopped) return
+    try {
+      const raw = await fetchWingsLogs(serverId, 800)
+      const now = Date.now()
+      const inBoot = bootPhase && now < bootUntil
+      if (raw !== null && raw !== undefined && raw !== lastLog) {
+        lastLog = raw
+        idleTicks = 0
+        const lines = raw.split('\n').filter(Boolean)
+        if (!baselineDone) {
+          // Seed seen set from existing docker log so old session lines are not re-emitted
+          baselineDone = true
+          for (const line of lines) seenLines.add(line)
+        } else {
+          if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('server:log-snapshot', { serverId, logs: raw, host: hostHint })
+          }
+          for (const line of lines) {
+            if (!seenLines.has(line)) {
+              seenLines.add(line)
+              sendServerLog(serverId, line)
+            }
+          }
+          if (seenLines.size > 2000) seenLines = new Set(lines.slice(-400))
+        }
+        ingestTpsLine(serverId, raw)
+        if (/Done \(/.test(raw) || /For help, type/.test(raw)) {
+          bootPhase = false
+          updateServerConfig(serverId, { status: 'running' })
+          startTpsPoller(serverId)
+        }
+      } else {
+        idleTicks++
+      }
+      if (!inBoot && idleTicks > 45) { finish(); return }
+      if (stopped) return
+      setTimeout(tick, inBoot ? 300 : 1000)
+    } catch {
+      if (stopped) return
+      setTimeout(tick, bootPhase ? 500 : 2000)
+    }
+  }
+  tick()
+}
+
+function beginLogSession(serverId) {
+  if (!global._logGen) global._logGen = {}
+  global._logGen[serverId] = (global._logGen[serverId] || 0) + 1
+  cancelStopCleanup(serverId)
+  emitLogReset(serverId)
+  stopLogStream(serverId)
+  stopTpsPoller(serverId)
+}
+
+ipcMain.handle('server:start', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  const eulaFixed = ensureEula(server.id)
+  const javaFixed = ensureJava(server.id)
+  updateServerConfig(server.id, { status: 'starting' })
+  appendServerHistory(server.id, 'start')
+  beginLogSession(server.id)
+  if (eulaFixed) sendServerLog(server.id, '[Daemon] Ensured eula=true in eula.txt')
+  if (javaFixed) sendServerLog(server.id, `[Daemon] Switched Docker image ${javaFixed.from} → ${javaFixed.to} (needs Java ${javaFixed.need})`)
+  sendServerLog(server.id, '[Daemon] Starting server...')
+  startLogStream(server.id, { boot: true, baseline: true })
+  ensureWingsWs(server.id)
+  ensureSparkPlugin(server).catch(() => {})
+  try {
+    const data = await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'start', wait_seconds: 0 })
+    return { ok: true, data }
+  } catch (err) {
+    if (err.message && err.message.includes('server not found')) {
+      console.log('[Server] Server not found on Wings, syncing...')
+      sendServerLog(server.id, '[Daemon]: Syncing server configuration with daemon...')
+      const synced = await syncServerToWings(server.id)
+      if (synced) {
+        await new Promise(r => setTimeout(r, 1500))
+        try {
+          const data2 = await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'start', wait_seconds: 0 })
+          return { ok: true, data: data2 }
+        } catch (err2) {
+          updateServerConfig(server.id, { status: 'stopped', startError: err2.message })
+          sendServerLog(server.id, `[Daemon]: ${err2.message}`)
+          return { ok: false, error: err2.message }
+        }
+      }
+    }
+    updateServerConfig(server.id, { status: 'stopped', startError: err.message })
+    sendServerLog(server.id, `[Daemon]: ${err.message}`)
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('server:stop', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  updateServerConfig(server.id, { status: 'stopping' })
+  appendServerHistory(server.id, 'stop')
+  stopTpsPoller(server.id)
+  clearServerTps(server.id)
+  sendServerLog(server.id, '[Daemon] Stopping server...')
+  stopLogStream(server.id)
+  startLogStream(server.id, { baseline: true })
+  ensureWingsWs(server.id)
+  try {
+    await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'stop', wait_seconds: 0 })
+    scheduleStopCleanup(server.id, 15000)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('server:kill', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  try {
+    appendServerHistory(server.id, 'kill')
+    stopTpsPoller(server.id)
+    clearServerTps(server.id)
+    cancelStopCleanup(server.id)
+    sendServerLog(server.id, '[Daemon] Killed server')
+    stopLogStream(server.id)
+    await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'kill', wait_seconds: 0 })
+    updateServerConfig(server.id, { status: 'stopped' })
+    closeWingsWs(server.id, { reconnect: false })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('server:status', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${server.id}`)
+    const state = data?.state || 'offline'
+    const util = data?.utilization || {}
+    const isRunning = state === 'running'
+    const prev = server.status
+    let nextStatus = isRunning ? 'running' : (state === 'starting' || state === 'stopping' ? state : (state === 'offline' || state === 'stopped' ? 'stopped' : state))
+    if (prev === 'stopping' && isRunning) nextStatus = 'stopping'
+    if (prev === 'starting' && (state === 'offline' || state === 'stopped') && util.cpu_absolute === 0 && !util.memory_bytes) {
+      // keep starting briefly; cleanup path will mark stopped
+      nextStatus = 'starting'
+    }
+    if (isRunning && (prev === 'running' || prev === 'starting')) startTpsPoller(server.id)
+    if (!isRunning && (state === 'offline' || state === 'stopped') && (prev === 'running' || prev === 'stopping')) {
+      stopTpsPoller(server.id)
+      clearServerTps(server.id)
+      if (prev === 'running') nextStatus = 'stopped'
+    }
+    updateServerConfig(server.id, { status: nextStatus, resources_usage: util })
+    const live = _serverTps.get(server.id)
+    const tps = live?.tps ?? (isRunning ? (server.lastTps ?? null) : null)
+    return { ok: true, status: nextStatus, state, resources: util, tps }
+  } catch {
+    const live = _serverTps.get(serverId)
+    return { ok: true, status: 'stopped', resources: {}, tps: live?.tps ?? null }
+  }
+})
+
+ipcMain.handle('server:tps', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const live = _serverTps.get(serverId)
+  const server = getServerByUuid(serverId)
+  const tps = live?.tps ?? (server?.status === 'running' ? (server.lastTps ?? null) : null)
+  return { ok: true, tps, at: live?.at || server?.lastTpsAt || null }
+})
+
+ipcMain.handle('server:history', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+  cleanServerHistoryOnDisk(serverId)
+  const fresh = getServerByUuid(serverId)
+  const history = Array.isArray(fresh?.history) ? fresh.history : []
+  return { ok: true, history: dedupeServerHistory(history).slice(0, 20) }
 })
 
 ipcMain.handle('mc:getVersions', async (e) => {
@@ -612,14 +1804,10 @@ function sudoExec(command, timeout = 30000) {
         cachedSudoPassword = null
         return { ok: false, error: 'password_wrong' }
       }
+      return { ok: false, error: err.message }
     }
   }
-  try {
-    const result = execSync(`pkexec sh -c '${command.replace(/'/g, "'\\''")}' 2>&1`, { timeout, encoding: 'utf8' })
-    return { ok: true, output: result }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
+  return { ok: false, error: 'sudo_not_authenticated' }
 }
 
 ipcMain.handle('system:auth', async (e, password) => {
@@ -785,7 +1973,7 @@ ipcMain.handle('docker:install', async (e) => {
     const dockerVersion = '27.5.1'
 
     sendProgress('docker', 5, 'Đang tạo thư mục Docker...')
-    sudoExec(`mkdir -p ${binDir} ${dataDir} ${configDir} ${logDir}`)
+    for (const d of [binDir, dataDir, configDir, logDir]) fs.mkdirSync(d, { recursive: true })
 
     const arch = execSync('uname -m', { encoding: 'utf8' }).trim()
     const dockerArch = arch === 'aarch64' ? 'aarch64' : 'x86_64'
@@ -833,15 +2021,52 @@ ipcMain.handle('docker:install', async (e) => {
       return { ok: false, error: `Không tải được Docker: ${dlErr.message}` }
     }
 
+    const tmpDir = path.join(os.tmpdir(), `terver-docker-${Date.now()}`)
+    fs.mkdirSync(tmpDir, { recursive: true })
+
     sendProgress('docker', 50, 'Giải nén Docker binaries...')
-    sudoExec(`tar -xzf ${tmpFile} -C /tmp/`)
-    const bins = ['docker', 'dockerd', 'containerd', 'ctr', 'runc']
+    execSync(`tar -xzf ${tmpFile} -C ${tmpDir}`)
+
+    const dockerTmp = path.join(tmpDir, 'docker')
+    try { fs.mkdirSync(dockerTmp, { recursive: true }) } catch {}
+
+    // Download containerd-shim-runc-v2 separately (not included in Docker tarball)
+    const containerdVersion = '1.7.25'
+    const containerdArch = process.arch === 'x64' ? 'amd64' : process.arch === 'arm64' ? 'arm64' : 'arm'
+    const shimUrl = `https://github.com/containerd/containerd/releases/download/v${containerdVersion}/containerd-shim-runc-v2-${containerdVersion}-linux-${containerdArch}.tar.gz`
+    const shimTmpFile = path.join(tmpDir, `containerd-shim-${containerdVersion}.tar.gz`)
+    try {
+      await new Promise((resolve, reject) => {
+        const https = require('https')
+        const req = https.get(shimUrl, { headers: { 'User-Agent': 'TerverPanel' } }, (res) => {
+          if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return }
+          const file = fs.createWriteStream(shimTmpFile)
+          res.pipe(file)
+          file.on('finish', () => { file.close(); resolve() })
+          file.on('error', (err) => { fs.unlink(shimTmpFile, () => {}); reject(err) })
+        }).on('error', reject)
+        req.on('timeout', () => { req.destroy(); reject(new Error('Download timeout 60s')) })
+        req.setTimeout(60000)
+      })
+      execSync(`tar -xzf ${shimTmpFile} -C ${dockerTmp}`)
+      sendProgress('docker', 55, 'Downloaded containerd-shim-runc-v2')
+    } catch (e) {
+      sendProgress('docker', 55, `Warning: could not download containerd-shim: ${e.message}`)
+    }
+
+    const bins = ['docker', 'dockerd', 'containerd', 'ctr', 'runc', 'containerd-shim-runc-v2']
     let copied = 0
     for (const b of bins) {
-      try { sudoExec(`cp /tmp/docker/${b} ${binDir}/${b} && chmod +x ${binDir}/${b}`); copied++ } catch {}
+      const src = path.join(dockerTmp, b)
+      const dst = path.join(binDir, b)
+      try { if (fs.existsSync(src)) { fs.copyFileSync(src, dst); fs.chmodSync(dst, 0o755); copied++ } } catch {}
     }
-    try { sudoExec(`cp /tmp/docker/docker-proxy ${binDir}/docker-proxy && chmod +x ${binDir}/docker-proxy`); copied++ } catch {}
-    sudoExec(`rm -rf /tmp/docker ${tmpFile}`)
+    try {
+      const proxySrc = path.join(dockerTmp, 'docker-proxy')
+      const proxyDst = path.join(binDir, 'docker-proxy')
+      if (fs.existsSync(proxySrc)) { fs.copyFileSync(proxySrc, proxyDst); fs.chmodSync(proxyDst, 0o755); copied++ }
+    } catch {}
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {}
     sendProgress('docker', 62, `Đã copy ${copied} binaries vào ${binDir}`)
 
     sendProgress('docker', 65, 'Tạo daemon.json...')
@@ -852,7 +2077,7 @@ ipcMain.handle('docker:install', async (e) => {
       'log-driver': 'json-file',
       'log-opts': { 'max-size': '10m', 'max-file': '3' },
     }
-    sudoExec(`cat > ${configDir}/daemon.json << 'DEOF'\n${JSON.stringify(daemonConfig, null, 2)}\nDEOF`)
+    fs.writeFileSync(path.join(configDir, 'daemon.json'), JSON.stringify(daemonConfig, null, 2))
 
     sendProgress('docker', 72, 'Đang tạo containerd service...')
     const containerdService = `[Unit]
@@ -861,6 +2086,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=PATH=${binDir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${binDir}/containerd
 Restart=on-failure
 RestartSec=5
@@ -869,7 +2095,7 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 `
-    sudoExec(`cat > /etc/systemd/system/terver-containerd.service << 'SEOF'\n${containerdService}\nSEOF`)
+    fs.writeFileSync('/etc/systemd/system/terver-containerd.service', containerdService)
 
     sendProgress('docker', 75, 'Đang tạo docker service...')
     const serviceContent = `[Unit]
@@ -891,7 +2117,7 @@ LimitNOFILE=infinity
 [Install]
 WantedBy=multi-user.target
 `
-    sudoExec(`cat > /etc/systemd/system/terver-docker.service << 'SEOF'\n${serviceContent}\nSEOF`)
+    fs.writeFileSync('/etc/systemd/system/terver-docker.service', serviceContent)
     sudoExec('systemctl daemon-reload')
 
     sendProgress('docker', 82, 'Đang enable + start containerd...')
@@ -968,7 +2194,7 @@ ipcMain.handle('stats:docker', async (e) => {
 
     if (dockerDir) {
       const binPath = `${dockerDir}/bin/docker`
-      try { fs2.accessSync(binPath, fs2.constants.F_OK | fs2.constants.X_OK); installed = true } catch {}
+      try { fs.accessSync(binPath, fs.constants.F_OK | fs.constants.X_OK); installed = true } catch {}
       if (installed) {
         try { const s = execSync('systemctl is-active terver-docker 2>/dev/null', { timeout: 5000, encoding: 'utf8' }).trim(); running = s === 'active' } catch {}
         if (!running) {
@@ -1044,7 +2270,7 @@ ipcMain.handle('node:loadConfigs', async (e) => {
   // Wings config — from custom path
   if (wingsConfigPath) {
     try {
-      const raw = sudoExec(`cat ${wingsConfigPath}/config.yml 2>/dev/null`).output || ''
+      const raw = fs.readFileSync(`${wingsConfigPath}/config.yml`, 'utf8')
       const tokenMatch = raw.match(/token:\s*(.+)/)
       const uuidMatch = raw.match(/uuid:\s*(.+)/)
       configs.wings = { token: tokenMatch?.[1]?.trim() || '', uuid: uuidMatch?.[1]?.trim() || '' }
@@ -1053,7 +2279,7 @@ ipcMain.handle('node:loadConfigs', async (e) => {
   // Cloudflare config — from custom path
   if (cfDir) {
     try {
-      const raw = sudoExec(`cat ${cfDir}/config.yml 2>/dev/null`).output || ''
+      const raw = fs.readFileSync(`${cfDir}/config.yml`, 'utf8')
       const tunnelMatch = raw.match(/^tunnel:\s*(.+)/m)
       const hostnameMatch = raw.match(/hostname:\s*(.+)/)
       configs.cloudflare = { tunnelId: tunnelMatch?.[1]?.trim() || '', domain: hostnameMatch?.[1]?.trim() || '' }
@@ -1105,6 +2331,31 @@ ipcMain.handle('stats:network', async (e) => {
     return { ok: true, rxSpeed: 0, txSpeed: 0, rxTotal: rxBytes, txTotal: txBytes }
   } catch {
     return { ok: true, rxSpeed: 0, txSpeed: 0, rxTotal: 0, txTotal: 0 }
+  }
+})
+
+const prevServerNet = new Map()
+ipcMain.handle('stats:serverNetwork', async (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (!serverId) return { ok: false, rxSpeed: 0, txSpeed: 0 }
+  try {
+    const data = await wingsApiCall('GET', `/api/servers/${serverId}`)
+    const net = data?.utilization?.network
+    if (!net) return { ok: false, rxSpeed: 0, txSpeed: 0 }
+    const rx = Number(net.rx_bytes) || 0
+    const tx = Number(net.tx_bytes) || 0
+    const now = Date.now()
+    const prev = prevServerNet.get(serverId)
+    let rxSpeed = 0, txSpeed = 0
+    if (prev && now > prev.time) {
+      const elapsed = (now - prev.time) / 1000
+      if (rx >= prev.rx) rxSpeed = Math.max(0, (rx - prev.rx) / elapsed)
+      if (tx >= prev.tx) txSpeed = Math.max(0, (tx - prev.tx) / elapsed)
+    }
+    prevServerNet.set(serverId, { rx, tx, time: now })
+    return { ok: true, rxSpeed, txSpeed, rxTotal: rx, txTotal: tx, state: data?.state || 'unknown' }
+  } catch {
+    return { ok: false, rxSpeed: 0, txSpeed: 0 }
   }
 })
 
@@ -1170,13 +2421,12 @@ ipcMain.handle('wings:install', async (e) => {
     const binaryPath = `${wingsDir}/bin/wings`
     const configPath = `${wingsConfigDir}/config.yml`
 
-    sendProgress('wings', 2, 'Dừng Wings service...')
-    try { sudoExec('systemctl stop lunarspace-wings 2>/dev/null || true') } catch {}
-    try { sudoExec('systemctl disable lunarspace-wings 2>/dev/null || true') } catch {}
+    sendProgress('wings', 2, 'Dừng Wings process...')
+    stopWingsProcess()
 
     if (fs2.existsSync(binaryPath)) {
       sendProgress('wings', 3, 'Xóa binary cũ...')
-      try { sudoExec(`rm -f ${binaryPath}`) } catch {}
+      try { fs2.unlinkSync(binaryPath) } catch {}
     }
 
   return new Promise(async (resolve) => {
@@ -1271,69 +2521,24 @@ ipcMain.handle('wings:install', async (e) => {
       }
 
       sendProgress('wings', 75, `Cài binary vào ${binaryPath}...`)
-      let installRes = ''
       try {
-        sudoExec(`mkdir -p ${wingsDir}/bin`)
-        sudoExec(`cp -p ${tmpPath} ${binaryPath} && chmod +x ${binaryPath}`)
+        fs2.mkdirSync(path.dirname(binaryPath), { recursive: true })
+        fs2.copyFileSync(tmpPath, binaryPath)
+        fs2.chmodSync(binaryPath, 0o755)
       } catch (copyErr) {
         throw new Error('Không thể cài binary Wings')
       }
       fs2.unlinkSync(tmpPath)
 
       sendProgress('wings', 80, 'Đang tạo thư mục cấu hình...')
-      sudoExec(`mkdir -p ${wingsConfigDir}`)
+      fs2.mkdirSync(wingsConfigDir, { recursive: true })
 
       sendProgress('wings', 82, 'Đang kiểm tra phiên bản Wings...')
       const versionOut = execSync(`${binaryPath} --version 2>&1 || true`, { timeout: 5000, encoding: 'utf8' })
       const versionMatch = versionOut.match(/(\d+\.\d+\.\d+)/)
 
-      const initSystem = fs2.existsSync('/run/systemd/system') ? 'systemd' : 'openrc'
-      sendProgress('wings', 85, `Phát hiện init system: ${initSystem} — đang tạo service file...`)
-      let serviceContent
-      if (initSystem === 'systemd') {
-        serviceContent = `[Unit]
-Description=LunarSpace Wings Daemon
-After=network.target docker.service docker.socket
-Wants=docker.socket
-
-[Service]
-User=root
-KillMode=process
-LimitNOFILE=4096
-PIDFile=/run/lunarspace-wings/daemon.pid
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do [ -S /run/docker.sock ] && exit 0; sleep 1; done; echo "Docker socket not ready"; exit 1'
-ExecStart=${binaryPath} --config ${configPath}
-Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-`
-        sudoExec(`cat > /etc/systemd/system/lunarspace-wings.service << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
-        sendProgress('wings', 92, 'Đang reload daemon + enable service...')
-        sudoExec('systemctl daemon-reload')
-      } else {
-        serviceContent = `#!/sbin/openrc-run
-description="LunarSpace Wings Daemon"
-command="${binaryPath}"
-supervisor="supervise-daemon"
-pidfile="/run/lunarspace-wings.pid"
-rc_ulimit="-n 4096"
-respawn_delay=5
-respawn_max=30
-respawn_period=180
-depend() {
-    need net docker
-}
-`
-        sudoExec(`cat > /etc/init.d/lunarspace-wings << 'SERVICEEOF'\n${serviceContent}\nSERVICEEOF`)
-        sudoExec('chmod +x /etc/init.d/lunarspace-wings')
-      }
-
       sendProgress('wings', 100, `Cài thành công Wings ${versionMatch ? versionMatch[1] : 'unknown'} (${arch})`)
-      resolve({ ok: true, version: versionMatch ? versionMatch[1] : 'unknown', arch, initSystem })
+      resolve({ ok: true, version: versionMatch ? versionMatch[1] : 'unknown', arch })
     } catch (err) {
       sendProgress('wings', 0, `Lỗi: ${err.message}`)
       resolve({ ok: false, error: err.message })
@@ -1346,13 +2551,8 @@ depend() {
 
 ipcMain.handle('wings:start', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const fs2 = require('fs')
   try {
-    if (fs2.existsSync('/run/systemd/system')) {
-      sudoExec('systemctl start lunarspace-wings')
-    } else {
-      sudoExec('rc-service lunarspace-wings start')
-    }
+    sudoExec('systemctl start lunarspace-wings')
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -1361,13 +2561,8 @@ ipcMain.handle('wings:start', async (e) => {
 
 ipcMain.handle('wings:stop', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const fs2 = require('fs')
   try {
-    if (fs2.existsSync('/run/systemd/system')) {
-      sudoExec('systemctl stop lunarspace-wings')
-    } else {
-      sudoExec('rc-service lunarspace-wings stop')
-    }
+    sudoExec('systemctl stop lunarspace-wings')
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -1376,7 +2571,6 @@ ipcMain.handle('wings:stop', async (e) => {
 
 ipcMain.handle('systemd:status', async (e, serviceName) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const { execSync } = require('child_process')
   try {
     const fs2 = require('fs')
     const isSystemd = fs2.existsSync('/run/systemd/system')
@@ -1396,7 +2590,6 @@ ipcMain.handle('systemd:status', async (e, serviceName) => {
 
 ipcMain.handle('systemd:start', async (e, serviceName) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const { execSync } = require('child_process')
   try {
     const fs2 = require('fs')
     const isSystemd = fs2.existsSync('/run/systemd/system')
@@ -1419,7 +2612,6 @@ ipcMain.handle('systemd:start', async (e, serviceName) => {
 
 ipcMain.handle('systemd:stop', async (e, serviceName) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
-  const { execSync } = require('child_process')
   try {
     const fs2 = require('fs')
     const isSystemd = fs2.existsSync('/run/systemd/system')
@@ -1462,7 +2654,6 @@ ipcMain.handle('systemd:logs', async (e, serviceName, lines = 80) => {
 ipcMain.handle('docker:start', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const { execSync } = require('child_process')
     let svc = 'docker'
     try { execSync('systemctl list-unit-files terver-docker.service 2>/dev/null | grep terver-docker', { encoding: 'utf8' }); svc = 'terver-docker' } catch {}
     sudoExec(`systemctl start ${svc}`)
@@ -1475,7 +2666,6 @@ ipcMain.handle('docker:start', async (e) => {
 ipcMain.handle('docker:stop', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const { execSync } = require('child_process')
     let svc = 'docker'
     try { execSync('systemctl list-unit-files terver-docker.service 2>/dev/null | grep terver-docker', { encoding: 'utf8' }); svc = 'terver-docker' } catch {}
     sudoExec(`systemctl stop ${svc}`)
@@ -1488,10 +2678,17 @@ ipcMain.handle('docker:stop', async (e) => {
 ipcMain.handle('cloudflared:start', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const { execSync } = require('child_process')
-    let svc = 'cloudflared'
-    try { execSync('systemctl list-unit-files terver-cloudflare.service 2>/dev/null | grep terver-cloudflare', { encoding: 'utf8' }); svc = 'terver-cloudflare' } catch {}
-    sudoExec(`systemctl start ${svc}`)
+    const settings = readSettings()
+    const paths = settings.paths || {}
+    const cfDir = (paths.cloudflare || '').replace(/^~/, os.homedir())
+    const binPath = cfDir ? `${cfDir}/bin/cloudflared` : 'cloudflared'
+    const credDir = cfDir ? `${cfDir}/credentials` : path.join(os.homedir(), '.cloudflared')
+    if (cloudflaredProcess) { try { cloudflaredProcess.kill('SIGTERM') } catch {} cloudflaredProcess = null }
+    cloudflaredProcess = spawn(binPath, ['tunnel', '--config', `${credDir}/config.yml`, 'run'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: cfDir ? `${cfDir}/bin:${process.env.PATH}` : process.env.PATH },
+    })
+    cloudflaredProcess.on('exit', () => { cloudflaredProcess = null })
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -1501,10 +2698,7 @@ ipcMain.handle('cloudflared:start', async (e) => {
 ipcMain.handle('cloudflared:stop', async (e) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const { execSync } = require('child_process')
-    let svc = 'cloudflared'
-    try { execSync('systemctl list-unit-files terver-cloudflare.service 2>/dev/null | grep terver-cloudflare', { encoding: 'utf8' }); svc = 'terver-cloudflare' } catch {}
-    sudoExec(`systemctl stop ${svc}`)
+    if (cloudflaredProcess) { try { cloudflaredProcess.kill('SIGTERM') } catch {} cloudflaredProcess = null }
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -1554,63 +2748,77 @@ function startWingsApiServer() {
       next()
     })
 
+    // resolveDockerImage is defined at module top level (shared with ensureJava)
+
     // Helper: read servers from DB
     function getServers() {
       try {
         const db = readDB()
-        return Object.values(db.servers || {}).map(s => ({
-          settings: {
-            uuid: s.uuid || s.id,
-            start_on_completion: false,
-            meta: { name: s.name, description: s.name },
-            suspended: false,
-            invocation: s.startup || 'java -Xms512M -Xmx1G -jar server.jar nogui',
-            skip_egg_scripts: false,
-            entrypoint: null,
-            environment: {},
-            labels: {},
-            backups: [],
-            schedules: [],
-            allocations: {
-              force_outgoing_ip: false,
-              default: { ip: '0.0.0.0', port: s.port || 25565 },
-              mappings: {}
+        const servers = db.servers || []
+        return servers.map(s => {
+          const res = s.resources || {}
+          const env = s.config || {}
+          const startupCmd = s.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}'
+          const jarFile = env.SERVER_JARFILE || 'server.jar'
+          const resolvedStartup = startupCmd.replace(/\{\{SERVER_JARFILE\}\}/g, jarFile)
+            .replace(/\{\{SERVER_MEMORY\}\}/g, String(res.memory || 1024))
+          const memFlag = `-Xms128M -Xmx${res.memory || 1024}M`
+          const finalStartup = resolvedStartup.replace(/-Xms\d+M -Xmx\d+M/, memFlag)
+
+          return {
+            settings: {
+              uuid: s.id,
+              start_on_completion: false,
+               meta: { name: s.name, description: s.name, startup_command: finalStartup, egg: { id: '00000000-0000-0000-0000-000000000001' } },
+              suspended: false,
+              invocation: finalStartup,
+              skip_egg_scripts: false,
+              entrypoint: null,
+              environment: env,
+              labels: {},
+              backups: [],
+              schedules: [],
+              allocations: {
+                force_outgoing_ip: false,
+                default: { ip: '0.0.0.0', port: s.port || 25565 },
+                mappings: {}
+              },
+              build: {
+                memory_limit: res.memory || 1024,
+                overhead_memory: 0,
+                swap: 0,
+                io_weight: null,
+                cpu_limit: res.cpuPercent || 100,
+                disk_space: res.disk || 10240,
+                threads: res.cpuCores ? String(res.cpuCores) : null,
+                oom_disabled: false
+              },
+              mounts: [],
+              firewall: [],
+              egg: { id: '00000000-0000-0000-0000-000000000001', file_denylist: [] },
+              container: {
+                image: resolveDockerImage(s),
+                timezone: null,
+                hugepages_passthrough_enabled: false,
+                kvm_passthrough_enabled: false,
+                seccomp: { remove_allowed: [] }
+              },
+              auto_kill: { enabled: false, seconds: 0 },
+              auto_start_behavior: 'never',
+              features: { startup_cpu_boost: null, runtime_cpu_boost: null }
             },
-            build: {
-              memory_limit: s.ram || 1024,
-              overhead_memory: 0,
-              swap: 0,
-              io_weight: null,
-              cpu_limit: s.cpu || 100,
-              disk_space: s.disk || 10240,
-              threads: null,
-              oom_disabled: false
-            },
-            mounts: [],
-            firewall: [],
-            egg: { id: '00000000-0000-0000-0000-000000000001', file_denylist: [] },
-            container: {
-              image: s.image || 'itzg/minecraft-server',
-              timezone: null,
-              hugepages_passthrough_enabled: false,
-              kvm_passthrough_enabled: false,
-              seccomp: { remove_allowed: [] }
-            },
-            auto_kill: { enabled: false, seconds: 0 },
-            auto_start_behavior: 'always',
-            features: { startup_cpu_boost: null, runtime_cpu_boost: null }
-          },
-          process_configuration: {
-            startup: { done: null, strip_ansi: false },
-            stop: { type: 'tag', value: null },
-            configs: []
+            process_configuration: {
+              startup: { done: [s.donePattern || ')! For help, type'], strip_ansi: false },
+              stop: { type: 'tag', value: s.stopCommand || 'stop' },
+              configs: []
+            }
           }
-        }))
+        })
       } catch { return [] }
     }
 
     function getServer(uuid) {
-      return getServers().find(s => s.uuid === uuid) || null
+      return getServers().find(s => s.settings?.uuid === uuid) || null
     }
 
     // ─── Endpoints ───────────────────────────────────────────────────
@@ -1621,25 +2829,81 @@ function startWingsApiServer() {
       const allServers = getServers()
       const start = (page - 1) * perPage
       const servers = allServers.slice(start, start + perPage)
-      res.json({ data: servers, meta: { current_page: page, per_page: perPage, total: allServers.length } })
+      const totalPages = Math.ceil(allServers.length / perPage)
+      res.json({
+        data: servers,
+        meta: {
+          current_page: page,
+          from: allServers.length > 0 ? (start + 1) : 0,
+          last_page: totalPages,
+          per_page: perPage,
+          path: '/api/remote/servers',
+          to: Math.min(start + perPage, allServers.length),
+          total: allServers.length
+        }
+      })
     })
 
     // Get single server
-    apiApp.get('/api/remote/servers/:uuid', (req, res) => {
-      const server = getServer(req.params.uuid)
-      if (!server) return res.status(404).json({ error: 'Server not found' })
-      res.json({ data: server })
-    })
+     apiApp.get('/api/remote/servers/:uuid', (req, res) => {
+       const server = getServer(req.params.uuid)
+       if (!server) return res.status(404).json({ error: 'Server not found', errors: [] })
+       res.json(server)
+     })
 
     // Get install script
     apiApp.get('/api/remote/servers/:uuid/install', (req, res) => {
       const server = getServer(req.params.uuid)
       if (!server) return res.status(404).json({ error: 'Server not found' })
-      res.json({ command: '', done: true })
+      const dbServer = getServerByUuid(req.params.uuid)
+      if (!dbServer || dbServer.installedAt) return res.json({ command: '', done: true })
+      const eggId = dbServer?.eggId || ''
+      try {
+        const eggsDir = path.join(__dirname, 'eggs')
+        const parts = eggId.split('/')
+        const filePath = path.join(eggsDir, parts[0], parts[1] + '.json')
+        const raw = fs.readFileSync(filePath, 'utf8')
+        const egg = JSON.parse(raw)
+        const install = egg.scripts?.installation || {}
+        const envVars = {}
+        if (egg.variables) {
+          for (const v of egg.variables) {
+            if (v.env_variable && v.default_value !== undefined) {
+              envVars[v.env_variable] = v.default_value
+            }
+          }
+        }
+        if (dbServer.config) Object.assign(envVars, dbServer.config)
+        res.json({
+          script: install.script || '',
+          container_image: install.container || 'ghcr.io/pelican-eggs/installers:alpine',
+          entrypoint: install.entrypoint || 'ash',
+          done: false,
+          environment: envVars,
+        })
+      } catch {
+        res.json({ command: '', done: true })
+      }
     })
 
     // Report install status
     apiApp.post('/api/remote/servers/:uuid/install', (req, res) => {
+      const body = req.body || {}
+      const dbServer = getServerByUuid(req.params.uuid)
+      if (dbServer) {
+        if (body.successful !== false) {
+          updateServerConfig(dbServer.id, {
+            status: 'stopped',
+            installedAt: new Date().toISOString(),
+          })
+          sendServerProgress(dbServer.id, 100, 'Installation complete!')
+          sendServerLog(dbServer.id, '[Install] Wings installation completed successfully!')
+        } else {
+          updateServerConfig(dbServer.id, { status: 'error', installError: 'Wings install failed' })
+          sendServerProgress(dbServer.id, 0, 'Installation failed!')
+          sendServerLog(dbServer.id, '[Install] Wings installation failed!')
+        }
+      }
       res.json({ successful: true, reinstall: false })
     })
 
@@ -1734,13 +2998,13 @@ ipcMain.handle('wings:config:generate', async (e) => {
     const configDir = (paths.wingsConfig || '/etc/lunarspace-wings').replace(/\/+$/, '')
     const dataDir = (paths.wings || '~/.local/share/terver/wings').replace(/\/+$/, '')
     const configPath = `${configDir}/config.yml`
-    sudoExec(`mkdir -p ${configDir}`)
+    fs.mkdirSync(configDir, { recursive: true })
     const config = {
       uuid: require('crypto').randomUUID(),
       token_id: wingsApiTokenId || '1',
       token: wingsApiToken || crypto.randomBytes(32).toString('hex'),
       remote: `http://127.0.0.1:6543`,
-      api: { host: '0.0.0.0', port: 8080, ssl: { enabled: false } },
+      api: { host: '0.0.0.0', port: 8080, ssl: { enabled: false }, send_offline_server_logs: true, websocket_log_count: 500 },
       system: {
         root_directory: dataDir,
         data: `${dataDir}/servers`,
@@ -1753,10 +3017,9 @@ ipcMain.handle('wings:config:generate', async (e) => {
         username: 'lunarspace',
       },
       allowed_mounts: ['/home', `${dataDir}/servers`],
-      docker: { network: { interface: 'wings0', name: 'lunarspace-net', subnet: '172.18.0.0/16' } },
+      docker: { network: { interface: 'wings0', name: 'lunarspace-net', mode: 'lunarspace-net', subnet: '172.18.0.0/16' } },
     }
-    sudoExec(`cat > ${configPath} << 'YAMLEOF'\n${yaml.dump(config)}\nYAMLEOF`)
-    sudoExec(`chmod 600 ${configPath}`)
+    fs.writeFileSync(configPath, yaml.dump(config), { mode: 0o600 })
     return { ok: true, path: configPath, token: config.token, uuid: config.uuid }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -1823,7 +3086,7 @@ ipcMain.handle('cloudflare:install', async (e, arch) => {
       const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${realArch}`
       sendProgress('cloudflare', 5, `Phát hiện kiến trúc: ${realArch}`)
       sendProgress('cloudflare', 10, 'Đang tạo thư mục...')
-      sudoExec(`mkdir -p ${binDir}`)
+      fs.mkdirSync(binDir, { recursive: true })
       sendProgress('cloudflare', 15, 'Đang tải cloudflared từ GitHub...')
 
       const downloadFile = (url, dest, redirectCount = 0) => new Promise((res, rej) => {
@@ -1872,20 +3135,10 @@ ipcMain.handle('cloudflare:install', async (e, arch) => {
           fs2.copyFileSync(tmpPath, binaryPath)
           fs2.chmodSync(binaryPath, 0o755)
         } catch (copyErr) {
-          if (copyErr.code === 'EACCES' || copyErr.code === 'EPERM') {
-            const cpResult = sudoExec(`cp -p ${tmpPath} ${binaryPath} && chmod +x ${binaryPath}`)
-            if (!cpResult.ok) {
-              fs2.unlink(tmpPath, () => {})
-              sendProgress('cloudflare', 0, `Lỗi quyền: ${cpResult.error}`)
-              resolve({ ok: false, error: 'Cần quyền sudo để cài cloudflared' + '\n' + (cpResult.error || '') })
-              return
-            }
-          } else {
-            fs2.unlink(tmpPath, () => {})
-            sendProgress('cloudflare', 0, `Lỗi: ${copyErr.message}`)
-            resolve({ ok: false, error: copyErr.message })
-            return
-          }
+          fs2.unlink(tmpPath, () => {})
+          sendProgress('cloudflare', 0, `Lỗi: ${copyErr.message}`)
+          resolve({ ok: false, error: copyErr.message })
+          return
         }
         fs2.unlink(tmpPath, () => {})
         sendProgress('cloudflare', 90, 'Đang xác minh phiên bản...')
@@ -1915,14 +3168,14 @@ ipcMain.handle('cloudflare:tunnel:create', async (e, tunnelName, appDomain) => {
   const paths = settings.paths || {}
   const cfDir = (paths.cloudflare || '').replace(/^~/, os.homedir())
 
-  const sudoRun = async (cmd) => {
-    try {
-      const result = sudoExec(`bash -c '${cmd.replace(/'/g, "'\\''")}' 2>&1`)
-      return { ok: true, output: result.output || '' }
-    } catch (err) {
-      return { ok: false, error: err.message, output: '' }
+    const sudoRun = async (cmd) => {
+      try {
+        const result = execSync(cmd, { timeout: 30000, encoding: 'utf8' })
+        return { ok: true, output: result || '' }
+      } catch (err) {
+        return { ok: false, error: err.message, output: err.stdout || '' }
+      }
     }
-  }
 
   try {
     const binPath = cfDir ? `${cfDir}/bin/cloudflared` : 'cloudflared'
@@ -1930,15 +3183,12 @@ ipcMain.handle('cloudflare:tunnel:create', async (e, tunnelName, appDomain) => {
       return { ok: false, error: 'cloudflared chưa được cài đặt. Hãy cài trước.' }
     }
 
-    const credDir = cfDir ? `${cfDir}/credentials` : '/root/.cloudflared'
-    if (cfDir) sudoExec(`mkdir -p ${credDir}`)
+    const credDir = cfDir ? `${cfDir}/credentials` : path.join(os.homedir(), '.cloudflared')
+    try { fs.mkdirSync(credDir, { recursive: true }) } catch {}
     const certPath = `${credDir}/cert.pem`
 
     let hasCert = false
-    try {
-      const checkResult = await sudoRun(`test -f ${certPath} && echo "EXISTS"`)
-      hasCert = checkResult.ok && checkResult.output && checkResult.output.includes('EXISTS')
-    } catch {}
+    try { hasCert = fs.existsSync(certPath) } catch {}
 
     if (!hasCert) {
       return { ok: false, error: 'Chưa xác thực Cloudflare. Hãy bấm "Đăng nhập" trên tab Trạng thái trước.' }
@@ -1972,9 +3222,12 @@ ipcMain.handle('cloudflare:tunnel:create', async (e, tunnelName, appDomain) => {
       ? `  - hostname: ${appDomain}\n    service: http://localhost:8000`
       : '  - service: http_status:404'
     const configContent = `tunnel: ${id}\ncredentials-file: ${credDir}/${id}.json\ningress:\n${ingressRules}\n  - service: http_status:404`
-    await sudoRun(`cat > ${credDir}/config.yml << 'CFEOF'\n${configContent}\nCFEOF`)
+    await fs.promises.writeFile(`${credDir}/config.yml`, configContent)
 
-    await sudoRun(`nohup ${binPath} tunnel --config ${credDir}/config.yml run ${tunnelName} > /dev/null 2>&1 &`)
+    const tunnelProc = spawn(binPath, ['tunnel', '--config', `${credDir}/config.yml`, 'run', tunnelName], {
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    })
+    tunnelProc.unref()
 
     return { ok: true, tunnelId: id, message: `Tunnel "${tunnelName}" đã tạo${appDomain ? `, route: ${appDomain}` : ''}` }
   } catch (err) {
@@ -1982,12 +3235,25 @@ ipcMain.handle('cloudflare:tunnel:create', async (e, tunnelName, appDomain) => {
   }
 })
 
+
 ipcMain.handle('cloudflare:tunnel:install-service', async (e, token) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    sudoExec(`cloudflared service install ${token || ''}`)
-    sudoExec('systemctl daemon-reload')
-    sudoExec('systemctl enable --now cloudflared')
+    const settings = readSettings()
+    const paths = settings.paths || {}
+    const cfDir = (paths.cloudflare || '').replace(/^~/, os.homedir())
+    const binPath = cfDir ? `${cfDir}/bin/cloudflared` : 'cloudflared'
+    const credDir = cfDir ? `${cfDir}/credentials` : path.join(os.homedir(), '.cloudflared')
+    const configPath = `${credDir}/config.yml`
+
+    if (cloudflaredProcess) { try { cloudflaredProcess.kill('SIGTERM') } catch {} cloudflaredProcess = null }
+    cloudflaredProcess = spawn(binPath, ['tunnel', '--config', configPath, 'run'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: cfDir ? `${cfDir}/bin:${process.env.PATH}` : process.env.PATH },
+    })
+    cloudflaredProcess.stdout?.on('data', (d) => console.log('[Cloudflare]', d.toString().trim()))
+    cloudflaredProcess.stderr?.on('data', (d) => console.error('[Cloudflare]', d.toString().trim()))
+    cloudflaredProcess.on('exit', () => { cloudflaredProcess = null })
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -2037,7 +3303,7 @@ ipcMain.handle('cloudflare:tunnel:check-auth', async (e) => {
     for (const loc of locations) {
       if (fs2.existsSync(loc)) {
         if (cfDir && !fs2.existsSync(`${cfDir}/cert.pem`) && loc !== `${cfDir}/cert.pem`) {
-          sudoExec(`mkdir -p ${cfDir} && cp ${loc} ${cfDir}/cert.pem && chmod 644 ${cfDir}/cert.pem`)
+          try { fs.mkdirSync(cfDir, { recursive: true }); fs.copyFileSync(loc, `${cfDir}/cert.pem`); fs.chmodSync(`${cfDir}/cert.pem`, 0o644) } catch {}
         }
         if (loc !== '/home/neo/.cloudflared/cert.pem' && fs2.existsSync('/home/neo/.cloudflared/cert.pem')) {
           // cert already in user home
@@ -2236,7 +3502,6 @@ app.whenReady().then(() => {
     try {
       const settings = readSettings()
       const autoStart = settings.autoStart || {}
-      const paths = settings.paths || {}
 
       if (autoStart.docker) {
         sudoExec('systemctl start terver-docker 2>/dev/null || true')
@@ -2250,14 +3515,38 @@ app.whenReady().then(() => {
       if (autoStart.database) {
         sudoExec('systemctl start postgresql 2>/dev/null || true')
       }
+      if (autoStart.database) {
+        sudoExec('systemctl start postgresql 2>/dev/null || true')
+      }
     } catch {}
   }, 2000)
+
+  // Sync all servers to Wings daemon after services are up
+  setTimeout(async () => {
+    try {
+      const servers = listServerConfigs()
+      console.log(`[App] Syncing ${servers.length} servers to Wings...`)
+      for (const s of servers) {
+        if (s.status === 'stopped' || s.status === 'running') {
+          await syncServerToWings(s.id)
+        }
+      }
+    } catch (err) {
+      console.error('[App] Sync failed:', err.message)
+    }
+  }, 8000)
+})
+
+app.on('before-quit', () => {
+  if (cloudflaredProcess) { try { cloudflaredProcess.kill('SIGTERM') } catch {} cloudflaredProcess = null }
+  for (const id of Array.from(_wingsWs.keys())) closeWingsWs(id, { reconnect: false })
+  stopWingsApiServer()
 })
 
 // ─── Wings Local API Proxy ──────────────────────────────────────────
 function getWingsLocalToken() {
   try {
-    const tokenStorePath = path.join(app.getPath('userData'), '.wings-api-token')
+    const tokenStorePath = path.join(app.getPath('userData'), 'wings-api-token.json')
     if (fs.existsSync(tokenStorePath)) {
       return JSON.parse(fs.readFileSync(tokenStorePath, 'utf8'))
     }
@@ -2267,11 +3556,10 @@ function getWingsLocalToken() {
 
 async function wingsApiCall(method, endpoint, body) {
   const tokenData = getWingsLocalToken()
-  const tokenId = tokenData?.tokenId || '1'
   const token = tokenData?.token || ''
   const url = `http://127.0.0.1:8080${endpoint}`
   const headers = {
-    'Authorization': `Bearer ${tokenId}.${token}`,
+    'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
     'Accept': 'application/vnd.pterodactyl.v1+json',
   }
@@ -2279,21 +3567,72 @@ async function wingsApiCall(method, endpoint, body) {
   if (body && method !== 'GET') opts.body = JSON.stringify(body)
   const resp = await fetch(url, opts)
   const text = await resp.text()
+  if (resp.status === 404) throw new Error('server not found')
+  if (!resp.ok) throw new Error(`Wings API ${resp.status}: ${text}`)
   try { return JSON.parse(text) } catch { return { raw: text } }
+}
+
+async function syncServerToWings(serverId) {
+  try {
+    console.log(`[Wings] Syncing server ${serverId} to Wings daemon...`)
+    const result = await wingsApiCall('POST', '/api/servers', {
+      uuid: serverId,
+      start_on_completion: false,
+      skip_scripts: false,
+    })
+    console.log(`[Wings] Server synced successfully:`, JSON.stringify(result))
+    return true
+  } catch (err) {
+    console.error(`[Wings] Sync failed:`, err.message)
+    return false
+  }
 }
 
 ipcMain.handle('wings:server:state', async (e, uuid) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
     const data = await wingsApiCall('GET', `/api/servers/${uuid}`)
-    return { ok: true, state: data?.attributes?.state || 'stopped' }
+    return { ok: true, state: data?.state || data?.configuration?.state || 'stopped' }
   } catch { return { ok: false, state: 'offline' } }
 })
 
 ipcMain.handle('wings:server:power', async (e, uuid, action) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
+    const eulaFixed = (action === 'start' || action === 'restart') ? ensureEula(uuid) : false
+    const javaFixed = (action === 'start' || action === 'restart') ? ensureJava(uuid) : null
     const data = await wingsApiCall('POST', `/api/servers/${uuid}/power`, { action, wait_seconds: 0 })
+    if (action === 'start' || action === 'restart') {
+      updateServerConfig(uuid, { status: 'starting' })
+      appendServerHistory(uuid, action === 'restart' ? 'restart' : 'start')
+      beginLogSession(uuid)
+      if (eulaFixed) sendServerLog(uuid, '[Daemon] Ensured eula=true in eula.txt')
+      if (javaFixed) sendServerLog(uuid, `[Daemon] Switched Docker image ${javaFixed.from} → ${javaFixed.to} (needs Java ${javaFixed.need})`)
+      sendServerLog(uuid, `[Daemon] ${action === 'restart' ? 'Restarting' : 'Starting'} server...`)
+      startLogStream(uuid, { boot: true, baseline: true })
+      ensureWingsWs(uuid)
+      const srv = getServerByUuid(uuid)
+      if (srv) ensureSparkPlugin(srv).catch(() => {})
+    } else if (action === 'stop') {
+      updateServerConfig(uuid, { status: 'stopping' })
+      appendServerHistory(uuid, 'stop')
+      stopTpsPoller(uuid)
+      clearServerTps(uuid)
+      sendServerLog(uuid, '[Daemon] Stopping server...')
+      stopLogStream(uuid)
+      startLogStream(uuid, { baseline: true })
+      ensureWingsWs(uuid)
+      scheduleStopCleanup(uuid, 15000)
+    } else if (action === 'kill') {
+      updateServerConfig(uuid, { status: 'stopped' })
+      appendServerHistory(uuid, 'kill')
+      stopTpsPoller(uuid)
+      clearServerTps(uuid)
+      sendServerLog(uuid, '[Daemon] Killed server')
+      stopLogStream(uuid)
+      cancelStopCleanup(uuid)
+      closeWingsWs(uuid, { reconnect: false })
+    }
     return { ok: true, data }
   } catch (err) { return { ok: false, error: err.message } }
 })
@@ -2306,35 +3645,179 @@ ipcMain.handle('wings:server:command', async (e, uuid, command) => {
   } catch (err) { return { ok: false, error: err.message } }
 })
 
-ipcMain.handle('wings:server:logs', async (e, uuid) => {
+ipcMain.handle('wings:server:logs', async (e, uuid, lines) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const data = await wingsApiCall('GET', `/api/servers/${uuid}/logs`)
-    return { ok: true, logs: data?.logs || data?.data || '' }
-  } catch { return { ok: true, logs: '' } }
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const n = Number(lines) > 0 ? Number(lines) : 500
+    const resp = await fetch(`http://127.0.0.1:8080/api/servers/${uuid}/logs?lines=${n}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'text/plain, application/json',
+      },
+      timeout: 10000,
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      if (resp.status === 404) return { ok: false, logs: '', error: 'server not found' }
+      return { ok: false, logs: '', error: errText || `HTTP ${resp.status}` }
+    }
+    const text = await resp.text()
+    let logs = text
+    try {
+      const json = JSON.parse(text)
+      if (typeof json === 'string') logs = json
+      else if (json && typeof json.logs === 'string') logs = json.logs
+      else if (json && typeof json.data === 'string') logs = json.data
+      else if (json && Array.isArray(json.lines)) logs = json.lines.join('\n')
+      else if (json && Array.isArray(json.data)) logs = json.data.join('\n')
+      else if (text && text !== '{}' && text !== 'null') logs = text
+    } catch {}
+    return { ok: true, logs: logs || '' }
+  } catch (err) {
+    return { ok: false, logs: '', error: err.message }
+  }
 })
 
 ipcMain.handle('wings:server:files', async (e, uuid, dirPath) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const data = await wingsApiCall('GET', `/api/servers/${uuid}/files/list?directory=${encodeURIComponent(dirPath || '/')}`)
-    return { ok: true, files: data?.data || data || [] }
-  } catch { return { ok: true, files: [] } }
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const dir = dirPath || '.'
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/list?directory=${encodeURIComponent(dir)}&per_page=500&page=1`
+    const resp = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+      timeout: 15000,
+    })
+    if (resp.ok) {
+      const data = await resp.json().catch(() => null)
+      const entries = data?.entries || data?.data || (Array.isArray(data) ? data : [])
+      if (Array.isArray(entries) && entries.length > 0) {
+        const entryIsDir = (en) => {
+          if (en.directory === true || en.is_dir === true || en.is_directory === true) return true
+          if (en.file === true) return false
+          if (en.mime === 'inode/directory') return true
+          const t = String(en.type || '').toLowerCase()
+          if (t === 'dir' || t === 'directory' || t === 'folder') return true
+          if (String(en.mode || '').startsWith('d')) return true
+          return false
+        }
+        const files = entries.map(en => ({
+          name: en.name || en.basename || String(en.path || '').split('/').pop(),
+          is_dir: entryIsDir(en),
+          size: en.size ?? en.physical_size ?? en.size_physical ?? 0,
+          modified: en.modified || en.mtime || en.created || new Date().toISOString(),
+        })).sort((a, b) => (b.is_dir - a.is_dir) || String(a.name).localeCompare(String(b.name)))
+        return { ok: true, files }
+      }
+      if (data && data.error && !data.entries) {
+        // path not found etc. — still try local fallback below
+      }
+    }
+  } catch {}
+  const serverDir = path.join(WINGS_DATA_DIR, uuid)
+  const targetDir = path.join(serverDir, dirPath || '/')
+  try {
+    if (!fs.existsSync(targetDir)) return { ok: true, files: [] }
+    if (!fs.statSync(targetDir).isDirectory()) return { ok: false, error: 'Not a directory', files: [] }
+    const entries = fs.readdirSync(targetDir, { withFileTypes: true })
+    const files = entries.map(e => ({
+      name: e.name,
+      is_dir: e.isDirectory(),
+      size: e.isFile() ? (fs.statSync(path.join(targetDir, e.name)).size || 0) : 0,
+      modified: fs.statSync(path.join(targetDir, e.name)).mtime.toISOString(),
+    })).sort((a, b) => (b.is_dir - a.is_dir) || a.name.localeCompare(b.name))
+    return { ok: true, files }
+  } catch (err) { return { ok: true, files: [], error: err.message } }
 })
 
 ipcMain.handle('wings:server:readFile', async (e, uuid, filePath) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const fullPath = path.join(WINGS_DATA_DIR, uuid, filePath)
   try {
-    const data = await wingsApiCall('GET', `/api/servers/${uuid}/files/read?file=${encodeURIComponent(filePath)}`)
-    return { ok: true, content: data?.content || data?.data || '' }
-  } catch { return { ok: false, content: '' } }
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+      return { ok: false, is_dir: true, content: '', error: 'EISDIR: directory' }
+    }
+  } catch {}
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/contents?file=${encodeURIComponent(filePath)}&download=false`
+    const resp = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'text/plain, application/json, */*',
+      },
+      timeout: 15000,
+    })
+    if (resp.ok) {
+      const text = await resp.text()
+      if (text) {
+        try {
+          const json = JSON.parse(text)
+          if (typeof json === 'string') return { ok: true, content: json }
+          if (json && typeof json.content === 'string') return { ok: true, content: json.content }
+          if (json && typeof json.data === 'string') return { ok: true, content: json.data }
+          if (json && (json.directory === true || json.is_dir === true)) {
+            return { ok: false, is_dir: true, content: '', error: 'EISDIR: directory' }
+          }
+        } catch {
+          return { ok: true, content: text }
+        }
+        return { ok: true, content: text }
+      }
+    } else {
+      const errText = await resp.text().catch(() => '')
+      if (resp.status === 404 || /not found|directory|EISDIR/i.test(errText)) {
+        try {
+          if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+            return { ok: false, is_dir: true, content: '', error: 'EISDIR: directory' }
+          }
+        } catch {}
+        return { ok: false, content: '', error: errText || `HTTP ${resp.status}` }
+      }
+    }
+  } catch {}
+  try {
+    const content = fs.readFileSync(fullPath, 'utf-8')
+    return { ok: true, content }
+  } catch (err) {
+    if (err && err.code === 'EISDIR') return { ok: false, is_dir: true, content: '', error: 'EISDIR: directory' }
+    return { ok: false, content: '', error: err.message }
+  }
 })
 
 ipcMain.handle('wings:server:writeFile', async (e, uuid, filePath, content) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const data = await wingsApiCall('POST', `/api/servers/${uuid}/files/write?file=${encodeURIComponent(filePath)}`, content)
-    return { ok: true, data }
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const user = '00000000-0000-0000-0000-000000000001'
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/write?file=${encodeURIComponent(filePath)}&user=${user}`
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/octet-stream',
+        'Accept': 'application/json',
+      },
+      body: typeof content === 'string' ? content : String(content ?? ''),
+      timeout: 15000,
+    })
+    if (resp.ok) return { ok: true }
+    const errText = await resp.text().catch(() => '')
+    if (resp.status !== 404) return { ok: false, error: errText || `HTTP ${resp.status}` }
+  } catch (err) {
+    // fall through to local write
+  }
+  const fullPath = path.join(WINGS_DATA_DIR, uuid, filePath)
+  try {
+    const dir = path.dirname(fullPath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(fullPath, content, 'utf-8')
+    return { ok: true }
   } catch (err) { return { ok: false, error: err.message } }
 })
 
@@ -2343,6 +3826,68 @@ ipcMain.handle('wings:server:deleteFile', async (e, uuid, filePath) => {
   try {
     const data = await wingsApiCall('DELETE', `/api/servers/${uuid}/files/delete?files[]=${encodeURIComponent(filePath)}`)
     return { ok: true, data }
+  } catch {}
+  const fullPath = path.join(WINGS_DATA_DIR, uuid, filePath)
+  try {
+    const stat = fs.statSync(fullPath)
+    if (stat.isDirectory()) fs.rmSync(fullPath, { recursive: true })
+    else fs.unlinkSync(fullPath)
+    return { ok: true }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+function localJoinPath(dir, name) {
+  const base = (dir || '/').replace(/\/+$/, '') || ''
+  return `${base}/${name}`.replace(/\/+/g, '/')
+}
+
+ipcMain.handle('wings:server:createFile', async (e, uuid, dirPath, fileName) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const name = String(fileName || '').trim()
+  if (!name || name.includes('/') || name.includes('\\')) return { ok: false, error: 'Invalid name' }
+  const rel = localJoinPath(dirPath || '/', name)
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const user = '00000000-0000-0000-0000-000000000001'
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/write?file=${encodeURIComponent(rel)}&user=${user}`
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+      body: '',
+      timeout: 10000,
+    })
+    if (resp.ok) return { ok: true, path: rel }
+  } catch {}
+  try {
+    const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+    if (!fs.existsSync(fullPath)) fs.writeFileSync(fullPath, '', 'utf-8')
+    return { ok: true, path: rel }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:createFolder', async (e, uuid, dirPath, folderName) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const name = String(folderName || '').trim()
+  if (!name || name.includes('/') || name.includes('\\')) return { ok: false, error: 'Invalid name' }
+  const rel = localJoinPath(dirPath || '/', name)
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const user = '00000000-0000-0000-0000-000000000001'
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/create-folder?file=${encodeURIComponent(rel)}&user=${user}`
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
+      timeout: 10000,
+    })
+    if (resp.ok) return { ok: true, path: rel }
+  } catch {}
+  try {
+    const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
+    fs.mkdirSync(fullPath, { recursive: true })
+    return { ok: true, path: rel }
   } catch (err) { return { ok: false, error: err.message } }
 })
 
@@ -2365,8 +3910,14 @@ ipcMain.handle('wings:server:reinstall', async (e, uuid) => {
 ipcMain.handle('wings:server:delete', async (e, uuid) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   try {
-    const data = await wingsApiCall('DELETE', `/api/servers/${uuid}`)
-    return { ok: true, data }
+    removeServerConfig(uuid)
+    const serverDir = path.join(WINGS_DATA_DIR, uuid)
+    if (fs.existsSync(serverDir)) {
+      fs.rmSync(serverDir, { recursive: true, force: true })
+    }
+    try { await wingsApiCall('DELETE', `/api/servers/${uuid}`) } catch {}
+    restartWings()
+    return { ok: true }
   } catch (err) { return { ok: false, error: err.message } }
 })
 

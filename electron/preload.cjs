@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   quitApp: () => ipcRenderer.send('quit-app'),
 
   getVersion: () => ipcRenderer.invoke('app:version'),
+  clipboardWrite: (text) => ipcRenderer.invoke('clipboard:write', text),
 
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
@@ -28,6 +29,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getServerLogs: (name) => ipcRenderer.invoke('docker:getServerLogs', name),
 
   getServerConfigs: () => ipcRenderer.invoke('server:getConfigs'),
+  getServerConfig: (serverId) => ipcRenderer.invoke('server:getConfig', serverId),
   addServerConfig: (config) => ipcRenderer.invoke('server:addConfig', config),
   removeServerConfig: (id) => ipcRenderer.invoke('server:removeConfig', id),
 
@@ -43,6 +45,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadNodeConfigs: () => ipcRenderer.invoke('node:loadConfigs'),
   getPing: () => ipcRenderer.invoke('stats:ping'),
   getNetworkStats: () => ipcRenderer.invoke('stats:network'),
+  getServerNetworkStats: (serverId) => ipcRenderer.invoke('stats:serverNetwork', serverId),
 
   getWingsStatus: () => ipcRenderer.invoke('wings:status'),
   installWings: () => ipcRenderer.invoke('wings:install'),
@@ -77,16 +80,64 @@ contextBridge.exposeInMainWorld('electronAPI', {
   wingsServerState: (uuid) => ipcRenderer.invoke('wings:server:state', uuid),
   wingsServerPower: (uuid, action) => ipcRenderer.invoke('wings:server:power', uuid, action),
   wingsServerCommand: (uuid, command) => ipcRenderer.invoke('wings:server:command', uuid, command),
-  wingsServerLogs: (uuid) => ipcRenderer.invoke('wings:server:logs', uuid),
+  wingsServerLogs: (uuid, lines) => ipcRenderer.invoke('wings:server:logs', uuid, lines),
   wingsListFiles: (uuid, dir) => ipcRenderer.invoke('wings:server:files', uuid, dir),
   wingsReadFile: (uuid, path) => ipcRenderer.invoke('wings:server:readFile', uuid, path),
   wingsWriteFile: (uuid, path, content) => ipcRenderer.invoke('wings:server:writeFile', uuid, path, content),
   wingsDeleteFile: (uuid, path) => ipcRenderer.invoke('wings:server:deleteFile', uuid, path),
+  wingsCreateFile: (uuid, dir, name) => ipcRenderer.invoke('wings:server:createFile', uuid, dir, name),
+  wingsCreateFolder: (uuid, dir, name) => ipcRenderer.invoke('wings:server:createFolder', uuid, dir, name),
   wingsSyncConfig: (uuid, config) => ipcRenderer.invoke('wings:server:sync', uuid, config),
   wingsReinstall: (uuid) => ipcRenderer.invoke('wings:server:reinstall', uuid),
   wingsDeleteServer: (uuid) => ipcRenderer.invoke('wings:server:delete', uuid),
   wingsCreateServer: (uuid) => ipcRenderer.invoke('wings:server:create', uuid),
   wingsListServers: () => ipcRenderer.invoke('wings:servers:list'),
 
+  // Server lifecycle
+  installServer: (serverId) => ipcRenderer.invoke('server:install', serverId),
+  startGameServer: (serverId) => ipcRenderer.invoke('server:start', serverId),
+  stopGameServer: (serverId) => ipcRenderer.invoke('server:stop', serverId),
+  killGameServer: (serverId) => ipcRenderer.invoke('server:kill', serverId),
+  getServerStatus: (serverId) => ipcRenderer.invoke('server:status', serverId),
+  getServerHistory: (serverId) => ipcRenderer.invoke('server:history', serverId),
+  getServerTps: (serverId) => ipcRenderer.invoke('server:tps', serverId),
+  onServerTps: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:tps', handler)
+    return () => { ipcRenderer.removeListener('server:tps', handler) }
+  },
+
   onInstallProgress: (callback) => ipcRenderer.on('install:progress', (_, data) => callback(data)),
+  onServerProgress: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:progress', handler)
+    return () => { ipcRenderer.removeListener('server:progress', handler) }
+  },
+  onServerLog: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:log', handler)
+    return () => { ipcRenderer.removeListener('server:log', handler) }
+  },
+  onServerLogSnapshot: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:log-snapshot', handler)
+    return () => { ipcRenderer.removeListener('server:log-snapshot', handler) }
+  },
+  onServerLogReset: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('server:log-reset', handler)
+    return () => { ipcRenderer.removeListener('server:log-reset', handler) }
+  },
+  serverGetLogs: (serverId) => ipcRenderer.invoke('server:getLogs', serverId),
+
+  // Wings WebSocket console
+  wingsWsConnect: (serverId) => ipcRenderer.invoke('wings:ws-connect', serverId),
+  wingsWsDisconnect: (serverId) => ipcRenderer.invoke('wings:ws-disconnect', serverId),
+  wingsWsSend: (serverId, event, args) => ipcRenderer.invoke('wings:ws-send', serverId, event, args),
+  wingsWsStatus: (serverId) => ipcRenderer.invoke('wings:ws-status', serverId),
+  onWingsWsEvent: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('wings:ws-event', handler)
+    return () => { ipcRenderer.removeListener('wings:ws-event', handler) }
+  },
 })
