@@ -47,6 +47,9 @@
 
 .modal-backdrop {
   animation: fadeIn 0.2s ease;
+  background: rgba(0, 0, 0, 0.7);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
 }
 .modal-backdrop.closing {
   animation: fadeOut 0.2s ease forwards;

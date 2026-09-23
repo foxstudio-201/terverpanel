@@ -82,7 +82,11 @@ function getServers() {
         start_on_completion: false,
         meta: { name: s.name, description: s.name, startup_command: finalStartup, egg: { id: '00000000-0000-0000-0000-000000000001' } },
         suspended: false, invocation: finalStartup, skip_egg_scripts: false,
-        entrypoint: null, environment: env, labels: {}, backups: [],
+        entrypoint: null, environment: env, labels: {},
+        backups: (db.backups || []).filter(b => b.serverId === s.id).map(b => ({
+          id: b.uuid, name: b.name, completed_at: b.completed,
+          successful: !!b.isSuccessful, size: b.bytes || 0, created_at: b.created,
+        })),
         schedules: getSchedules(s.id).map(sch => ({
           id: sch.id,
           name: sch.name,

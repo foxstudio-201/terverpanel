@@ -3011,7 +3011,12 @@ function startWingsApiServer() {
               entrypoint: null,
               environment: env,
               labels: {},
-              backups: [],
+              backups: listBackupsForServer(s.id).map(b => ({
+                id: b.uuid, name: b.name, completed_at: b.completed,
+                successful: b.isSuccessful, size: b.bytes, created_at: b.created,
+                ignored_files: b.ignoredFiles, is_locked: b.isLocked,
+                checksum: b.checksum, files: b.files,
+              })),
               schedules: (readDB().schedules || []).filter(sch => sch.serverId === s.id).map(sch => ({
                 id: sch.id, name: sch.name, cron: sch.cron,
                 is_active: !!sch.isActive, is_processing: !!sch.isProcessing,
@@ -3181,22 +3186,150 @@ function startWingsApiServer() {
       res.json({ data: {} })
     })
 
-    // Backup endpoints
-    apiApp.post('/api/remote/backups/:uuid', (req, res) => { res.json({ data: {} }) })
-    apiApp.post('/api/remote/backups/:uuid/deletion', (req, res) => { res.json({ data: {} }) })
-    apiApp.post('/api/remote/backups/:uuid/restore', (req, res) => { res.json({ data: {} }) })
+    // Backup endpoints (wings → panel remote API, Calagopus contract)
+    apiApp.post('/api/remote/backups/:uuid', (req, res) => {
+      try {
+        const backup = getBackupRecord(req.params.uuid)
+        if (!backup) return res.status(404).json({ error: 'Backup not found' })
+        const body = req.body || {}
+        const next = {
+          ...backup,
+          isSuccessful: body.successful !== false && body.successful !== undefined ? !!body.successful : (body.successful === undefined ? true : !!body.successful),
+          checksum: body.checksum ? (body.checksum_type ? `${body.checksum_type}:${body.checksum}` : body.checksum) : (backup.checksum || null),
+          bytes: Number(body.size ?? body.bytes ?? backup.bytes) || 0,
+          files: Number(body.files ?? backup.files) || 0,
+          isBrowsable: body.browsable !== undefined ? !!body.browsable : backup.isBrowsable,
+          isStreaming: body.streaming !== undefined ? !!body.streaming : backup.isStreaming,
+          completed: new Date().toISOString(),
+          status: body.successful === false ? 'failed' : 'completed',
+          metadata: { ...backup.metadata, ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}) },
+        }
+        if (body.successful === false) next.isSuccessful = false
+        if (body.successful === true) next.isSuccessful = true
+        const saved = saveBackupRecord(next)
+        emitBackupEvent(saved.serverId, 'completed', saved.uuid, {
+          successful: !!saved.isSuccessful,
+          checksum_type: body.checksum_type || 'sha256',
+          checksum: body.checksum || '',
+          size: saved.bytes,
+          files: saved.files,
+          browsable: !!saved.isBrowsable,
+          streaming: !!saved.isStreaming,
+          backup: normalizeBackupPayload(saved),
+        })
+        return res.json({ data: { uuid: saved.uuid, successful: !!saved.isSuccessful } })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
+    apiApp.post('/api/remote/backups/:uuid/deletion', (req, res) => {
+      try {
+        const backup = getBackupRecord(req.params.uuid)
+        if (!backup) return res.status(404).json({ error: 'Backup not found' })
+        const successful = req.body?.successful !== false
+        if (successful) removeBackupRecord(backup.uuid)
+        else saveBackupRecord({ ...backup, deletionStatus: 'failed' })
+        emitBackupEvent(backup.serverId, 'deleted', backup.uuid, { successful })
+        return res.json({ data: { uuid: backup.uuid, successful } })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
+    apiApp.post('/api/remote/backups/:uuid/restore', (req, res) => {
+      try {
+        const backup = getBackupRecord(req.params.uuid)
+        if (!backup) return res.status(404).json({ error: 'Backup not found' })
+        const successful = req.body?.successful !== false
+        emitBackupEvent(backup.serverId, 'restore-completed', backup.uuid, {
+          successful,
+          error: req.body?.error || null,
+        })
+        return res.json({ data: { uuid: backup.uuid, successful } })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
     apiApp.post('/api/remote/backups/:uuid/database/restore', (req, res) => { res.json({ data: {} }) })
     apiApp.get('/api/remote/backups/:uuid/database/source', (req, res) => { res.status(404).json({ error: 'Not available' }) })
-    apiApp.get('/api/remote/backups/:uuid', (req, res) => { res.json({ parts: [] }) })
+    apiApp.get('/api/remote/backups/:uuid', (req, res) => {
+      const backup = getBackupRecord(req.params.uuid)
+      if (!backup) return res.status(404).json({ error: 'Backup not found' })
+      return res.json({ parts: [], uuid: backup.uuid, successful: !!backup.isSuccessful })
+    })
     apiApp.get('/api/remote/backups/:uuid/s3/parts', (req, res) => { res.json({ parts: [] }) })
     apiApp.get('/api/remote/backups/:uuid/restic', (req, res) => { res.json({ repository: '' }) })
     apiApp.get('/api/remote/backups/:uuid/pbs', (req, res) => { res.json({}) })
     apiApp.get('/api/remote/backups/:uuid/kopia', (req, res) => { res.json({}) })
-    apiApp.post('/api/remote/servers/:uuid/backups', (req, res) => { res.json({ data: {} }) })
-    apiApp.post('/api/remote/servers/:uuid/backups/restore', (req, res) => { res.json({ data: {} }) })
+    apiApp.post('/api/remote/servers/:uuid/backups', (req, res) => {
+      try {
+        const server = getServerByUuid(req.params.uuid)
+        if (!server) return res.status(404).json({ error: 'Server not found' })
+        const body = req.body || {}
+        const existing = body.uuid ? getBackupRecord(body.uuid) : null
+        const uuid = existing?.uuid || body.uuid || generateUUID()
+        const record = existing || {
+          uuid,
+          serverId: server.id,
+          kind: 'server',
+          name: body.name || generateBackupName(),
+          ignoredFiles: Array.isArray(body.ignored_files) ? body.ignored_files : [],
+          isSuccessful: false,
+          isLocked: false,
+          isBrowsable: false,
+          isStreaming: false,
+          checksum: null,
+          bytes: 0,
+          files: 0,
+          metadata: {},
+          deletionStatus: null,
+          retentionStatus: null,
+          completed: null,
+          created: new Date().toISOString(),
+          status: 'running',
+        }
+        const saved = saveBackupRecord({ ...record, status: body.status || record.status || 'running' })
+        emitBackupEvent(saved.serverId, 'created', saved.uuid, normalizeBackupPayload(saved))
+        return res.json({ data: { uuid: saved.uuid } })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
+    apiApp.post('/api/remote/servers/:uuid/backups/restore', (req, res) => {
+      try {
+        const server = getServerByUuid(req.params.uuid)
+        if (!server) return res.status(404).json({ error: 'Server not found' })
+        const uuid = req.body?.uuid || req.body?.backup_uuid
+        if (uuid) emitBackupEvent(server.id, 'restore-started', uuid, {})
+        return res.json({ data: {} })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
     apiApp.post('/api/remote/servers/:uuid/backups/restore-database', (req, res) => { res.json({ data: {} }) })
-    apiApp.delete('/api/remote/servers/:uuid/backups', (req, res) => { res.json({ data: {} }) })
-    apiApp.patch('/api/remote/servers/:uuid/backups', (req, res) => { res.json({ data: {} }) })
+    apiApp.delete('/api/remote/servers/:uuid/backups', (req, res) => {
+      try {
+        const server = getServerByUuid(req.params.uuid)
+        if (!server) return res.status(404).json({ error: 'Server not found' })
+        const uuid = req.body?.uuid || req.query.uuid
+        if (uuid) {
+          const backup = getBackupRecord(uuid)
+          if (backup) {
+            emitBackupEvent(server.id, 'deleted', uuid, { successful: true })
+            removeBackupRecord(uuid)
+          }
+        }
+        return res.json({ data: {} })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
+    apiApp.patch('/api/remote/servers/:uuid/backups', (req, res) => {
+      try {
+        const server = getServerByUuid(req.params.uuid)
+        if (!server) return res.status(404).json({ error: 'Server not found' })
+        const body = req.body || {}
+        const uuid = body.uuid || body.backup_uuid
+        if (uuid) {
+          const backup = getBackupRecord(uuid)
+          if (backup) {
+            if (typeof body.name === 'string') backup.name = body.name
+            if (typeof body.locked === 'boolean') backup.isLocked = body.locked
+            if (typeof body.is_locked === 'boolean') backup.isLocked = body.is_locked
+            const saved = saveBackupRecord(backup)
+            emitBackupEvent(server.id, 'updated', uuid, normalizeBackupPayload(saved))
+          }
+        }
+        return res.json({ data: {} })
+      } catch (err) { return res.status(500).json({ error: err.message }) }
+    })
 
     // Tundra (tunnel) endpoints
     apiApp.get('/api/remote/tunnel/state', (req, res) => { res.json({ enabled: false, config: {} }) })
@@ -3889,16 +4022,9 @@ async function executeScheduleStep(serverId, step) {
   if (action === 'backup') {
     const server = getServerByUuid(serverId)
     if (!server) throw new Error('Server not found')
-    const srcDir = path.join(WINGS_DATA_DIR, serverId)
-    const backupsDir = path.join(srcDir, 'backups')
-    if (!fs.existsSync(srcDir)) throw new Error('Server directory missing')
-    fs.mkdirSync(backupsDir, { recursive: true, mode: 0o755 })
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const outName = `schedule-${stamp}.tar.gz`
-    const outPath = path.join(backupsDir, outName)
-    const res = await runProc('tar', ['-czf', outPath, '-C', srcDir, '--exclude=backups', '.'], { timeout: 120000 })
-    if (res.status !== 0) throw new Error(res.stderr || 'Backup failed')
-    sendServerLog(serverId, `[Schedule] Backup created: ${outName}`)
+    const name = String(step.backupName || step.name || '').trim() || undefined
+    const backup = await createServerBackup(serverId, { name, ignoredFiles: step.ignoredFiles || [] }, { wait: true })
+    sendServerLog(serverId, `[Schedule] Backup created: ${backup.name}`)
     return true
   }
   throw new Error(`Unknown action: ${action}`)
@@ -4034,6 +4160,8 @@ ipcMain.handle('schedule:create', (e, serverId, data) => {
         action: s.action,
         command: s.action === 'command' ? String(s.command || '') : undefined,
         power: s.action === 'power' ? String(s.power || 'start') : undefined,
+        backupName: s.action === 'backup' ? String(s.backupName || '') : undefined,
+        ignoredFiles: s.action === 'backup' && Array.isArray(s.ignoredFiles) ? s.ignoredFiles.map(String) : undefined,
         delay: Math.max(0, Math.min(600, Number(s.delay) || 0)),
         continueOnFailure: !!s.continueOnFailure,
       }))
@@ -4084,6 +4212,8 @@ ipcMain.handle('schedule:update', (e, scheduleId, data) => {
           action: s.action,
           command: s.action === 'command' ? String(s.command || '') : undefined,
           power: s.action === 'power' ? String(s.power || 'start') : undefined,
+          backupName: s.action === 'backup' && s.backupName ? String(s.backupName) : undefined,
+          ignoredFiles: s.action === 'backup' && Array.isArray(s.ignoredFiles) ? s.ignoredFiles : undefined,
           delay: Math.max(0, Math.min(600, Number(s.delay) || 0)),
           continueOnFailure: !!s.continueOnFailure,
         }))
@@ -4139,6 +4269,541 @@ ipcMain.handle('schedule:preview', (e, cron) => {
       human: valid ? humanizeCron(c) : '',
       nextRunAt: valid ? nextCronRun(c) : null,
     }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+// ─── Backups (Calagopus-style: DB entity + local tar.gz) ────────────
+function generateBackupName() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  const h = String(now.getHours()).padStart(2, '0')
+  const mi = String(now.getMinutes()).padStart(2, '0')
+  const s = String(now.getSeconds()).padStart(2, '0')
+  const off = now.getTimezoneOffset()
+  const sign = off <= 0 ? '+' : '-'
+  const oh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0')
+  const om = String(Math.abs(off) % 60).padStart(2, '0')
+  return `${y}-${m}-${d} ${h}:${mi}:${s} ${sign}${oh}${om}`
+}
+
+function getBackupsDir(serverId) {
+  const serverDir = ensureServerDir(serverId)
+  if (!serverDir) return null
+  const dir = path.join(serverDir, 'backups')
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 })
+    fs.accessSync(dir, fs.constants.W_OK)
+    return dir
+  } catch {
+    try {
+      const u = os.userInfo()
+      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${dir}' && chown -R ${u.uid}:${u.gid} '${dir}'`)
+      if (!r.ok) return null
+      fs.accessSync(dir, fs.constants.W_OK)
+      return dir
+    } catch {
+      return null
+    }
+  }
+}
+
+function listBackupRecords(serverId) {
+  const db = readDB()
+  return (db.backups || [])
+    .filter(b => b.serverId === serverId)
+    .sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))
+}
+
+function getBackupRecord(uuid) {
+  const db = readDB()
+  return (db.backups || []).find(b => b.uuid === uuid) || null
+}
+
+function saveBackupRecord(record) {
+  const db = readDB()
+  db.backups = db.backups || []
+  const i = db.backups.findIndex(b => b.uuid === record.uuid)
+  if (i >= 0) db.backups[i] = record
+  else db.backups.push(record)
+  writeDB(db)
+  return record
+}
+
+function removeBackupRecord(uuid) {
+  const db = readDB()
+  db.backups = (db.backups || []).filter(b => b.uuid !== uuid)
+  writeDB(db)
+}
+
+function backupFilePath(serverId, backup) {
+  const dir = path.join(WINGS_DATA_DIR, serverId, 'backups')
+  return path.join(dir, `${backup.uuid}.tar.gz`)
+}
+
+function emitBackupUpdate(serverId, payload) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('backup:update', { serverId, ...payload })
+  }
+}
+
+function emitBackupEvent(serverId, event, uuid, data) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('backup:update', { serverId, event, uuid, data })
+  }
+}
+
+function walkDirStats(dir, excludes = []) {
+  let bytes = 0
+  let files = 0
+  const excl = new Set(excludes.filter(Boolean).map(x => String(x).replace(/^\.\//, '')))
+  const skip = (rel) => {
+    for (const e of excl) {
+      if (rel === e || rel.startsWith(e + '/') || rel === './' + e || rel.startsWith('./' + e + '/')) return true
+    }
+    return false
+  }
+  const walk = (current, rel) => {
+    let entries
+    try { entries = fs.readdirSync(current, { withFileTypes: true }) } catch { return }
+    for (const ent of entries) {
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name
+      if (skip(childRel) || skip(`./${childRel}`)) continue
+      const full = path.join(current, ent.name)
+      if (ent.isDirectory()) walk(full, childRel)
+      else if (ent.isFile()) {
+        try {
+          const st = fs.statSync(full)
+          bytes += st.size
+          files += 1
+        } catch {}
+      }
+    }
+  }
+  walk(dir, '')
+  return { bytes, files }
+}
+
+function sha256File(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const hash = crypto.createHash('sha256')
+      const rs = fs.createReadStream(filePath)
+      rs.on('data', d => hash.update(d))
+      rs.on('end', () => resolve(hash.digest('hex')))
+      rs.on('error', () => resolve(null))
+    } catch { resolve(null) }
+  })
+}
+
+function normalizeBackupPayload(b) {
+  const completed = b.completed ? new Date(b.completed).toISOString() : null
+  return {
+    uuid: b.uuid,
+    backupGroupUuid: b.backupGroupUuid || null,
+    databaseInstanceUuid: b.databaseInstanceUuid || null,
+    databaseType: b.databaseType || null,
+    kind: b.kind || 'server',
+    name: b.name,
+    ignoredFiles: Array.isArray(b.ignoredFiles) ? b.ignoredFiles : [],
+    isSuccessful: !!b.isSuccessful,
+    isLocked: !!b.isLocked,
+    isBrowsable: !!b.isBrowsable,
+    isStreaming: !!b.isStreaming,
+    checksum: b.checksum || null,
+    bytes: b.bytes || 0,
+    files: b.files || 0,
+    metadata: b.metadata && typeof b.metadata === 'object' ? b.metadata : {},
+    deletionStatus: b.deletionStatus || null,
+    retentionStatus: b.retentionStatus || null,
+    completed,
+    created: b.created ? new Date(b.created).toISOString() : new Date().toISOString(),
+    serverId: b.serverId,
+    status: b.status || (completed ? (b.isSuccessful ? 'completed' : 'failed') : 'pending'),
+  }
+}
+
+function migrateDiskBackupsToDb(serverId) {
+  try {
+    const dir = path.join(WINGS_DATA_DIR, serverId, 'backups')
+    if (!fs.existsSync(dir)) return
+    const known = new Set(listBackupRecords(serverId).map(b => b.uuid))
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.tar.gz')) continue
+      if (known.has(f.replace(/\.tar\.gz$/, ''))) continue
+      const base = f.replace(/\.tar\.gz$/, '')
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(base)) continue
+      try {
+        const st = fs.statSync(path.join(dir, f))
+        saveBackupRecord({
+          uuid: generateUUID(),
+          serverId,
+          kind: 'server',
+          name: f.replace(/\.tar\.gz$/, ''),
+          fileName: f,
+          ignoredFiles: [],
+          isSuccessful: true,
+          isLocked: false,
+          isBrowsable: false,
+          isStreaming: false,
+          checksum: null,
+          bytes: st.size,
+          files: 0,
+          metadata: {},
+          deletionStatus: null,
+          retentionStatus: null,
+          completed: st.mtimeMs,
+          created: st.mtimeMs,
+          status: 'completed',
+        })
+      } catch {}
+    }
+  } catch {}
+}
+
+function listBackupsForServer(serverId) {
+  migrateDiskBackupsToDb(serverId)
+  return listBackupRecords(serverId).map(normalizeBackupPayload)
+}
+
+function listBackupsOnDisk(serverId) {
+  return listBackupsForServer(serverId)
+}
+
+function resolveBackupDiskPath(serverId, backup) {
+  const dir = path.join(WINGS_DATA_DIR, serverId, 'backups')
+  if (backup.fileName) {
+    const legacy = path.join(dir, path.basename(backup.fileName))
+    if (fs.existsSync(legacy)) return legacy
+  }
+  const primary = path.join(dir, `${backup.uuid}.tar.gz`)
+  if (fs.existsSync(primary)) return primary
+  const named = path.join(dir, `${backup.name}.tar.gz`)
+  if (fs.existsSync(named)) return named
+  return null
+}
+
+function sanitizeBackupId(id) {
+  const s = String(id || '').trim()
+  if (!s || s.includes('..') || s.includes('/') || s.includes('\\')) {
+    throw new Error('Invalid backup id')
+  }
+  return s
+}
+
+function beginServerBackup(serverId, opts = {}) {
+  const server = getServerByUuid(serverId)
+  if (!server) throw new Error('Server not found')
+  const srcDir = path.join(WINGS_DATA_DIR, serverId)
+  if (!fs.existsSync(srcDir)) throw new Error('Server directory missing')
+  const backupsDir = getBackupsDir(serverId)
+  if (!backupsDir) throw new Error('Không tạo được thư mục backups (permission denied)')
+
+  const name = String(opts.name || '').trim() || generateBackupName()
+  const ignoredFiles = Array.isArray(opts.ignoredFiles)
+    ? opts.ignoredFiles.map(x => String(x || '').trim()).filter(Boolean)
+    : []
+  const uuid = generateUUID()
+  const record = {
+    uuid,
+    serverId,
+    backupGroupUuid: opts.backupGroupUuid || null,
+    databaseInstanceUuid: null,
+    databaseType: null,
+    kind: 'server',
+    name,
+    ignoredFiles,
+    isSuccessful: false,
+    isLocked: false,
+    isBrowsable: false,
+    isStreaming: false,
+    checksum: null,
+    bytes: 0,
+    files: 0,
+    metadata: {},
+    deletionStatus: null,
+    retentionStatus: null,
+    completed: null,
+    created: new Date().toISOString(),
+    status: 'running',
+    fileName: `${uuid}.tar.gz`,
+  }
+  saveBackupRecord(record)
+  emitBackupEvent(serverId, 'created', uuid, normalizeBackupPayload(record))
+  sendServerLog(serverId, `[Backup] Creating "${name}"...`)
+
+  const job = (async () => {
+    const excludes = ['backups', ...ignoredFiles]
+    const totals = walkDirStats(srcDir, excludes)
+    const outPath = path.join(backupsDir, `${uuid}.tar.gz`)
+
+    let progressTimer = null
+    let cancelled = false
+    const emitProgress = () => {
+      if (cancelled) return
+      let processed = 0
+      try { processed = fs.existsSync(outPath) ? fs.statSync(outPath).size : 0 } catch {}
+      const bytesProcessed = Math.min(processed, totals.bytes || processed)
+      emitBackupEvent(serverId, 'progress', uuid, {
+        bytes_processed: bytesProcessed,
+        bytes_total: totals.bytes,
+        files_processed: totals.files,
+      })
+    }
+    progressTimer = setInterval(emitProgress, 400)
+    emitProgress()
+
+    try {
+      const tarArgs = ['-czf', outPath, '-C', srcDir, '--exclude=backups']
+      for (const ig of ignoredFiles) tarArgs.push(`--exclude=${ig}`)
+      tarArgs.push('.')
+      const res = await runProc('tar', tarArgs, { timeout: 600000 })
+      if (res.status !== 0) {
+        try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath) } catch {}
+        const msg = res.stderr || 'Backup failed'
+        const failed = saveBackupRecord({
+          ...record,
+          isSuccessful: false,
+          status: 'failed',
+          completed: new Date().toISOString(),
+          metadata: { ...record.metadata, error: msg },
+        })
+        emitBackupEvent(serverId, 'completed', uuid, {
+          successful: false,
+          checksum_type: '',
+          checksum: '',
+          size: 0,
+          files: 0,
+          browsable: false,
+          streaming: false,
+          error: msg,
+          backup: normalizeBackupPayload(failed),
+        })
+        sendServerLog(serverId, `[Backup] FAILED: ${msg}`)
+        throw new Error(msg)
+      }
+
+      let size = 0
+      try { size = fs.statSync(outPath).size } catch {}
+      const checksum = await sha256File(outPath)
+      const done = saveBackupRecord({
+        ...record,
+        isSuccessful: true,
+        status: 'completed',
+        bytes: size,
+        files: totals.files,
+        checksum: checksum ? `sha256:${checksum}` : null,
+        completed: new Date().toISOString(),
+        isBrowsable: true,
+        isStreaming: false,
+      })
+      emitBackupEvent(serverId, 'completed', uuid, {
+        successful: true,
+        checksum_type: 'sha256',
+        checksum: checksum || '',
+        size,
+        files: totals.files,
+        browsable: true,
+        streaming: false,
+        backup: normalizeBackupPayload(done),
+      })
+      sendServerLog(serverId, `[Backup] Created "${name}" (${size} bytes)`)
+      return normalizeBackupPayload(done)
+    } finally {
+      cancelled = true
+      if (progressTimer) clearInterval(progressTimer)
+    }
+  })()
+
+  return { record: normalizeBackupPayload(record), job }
+}
+
+async function createServerBackup(serverId, opts = {}, { wait = false } = {}) {
+  const { record, job } = beginServerBackup(serverId, opts)
+  if (wait) {
+    const done = await job
+    return done || normalizeBackupPayload(getBackupRecord(record.uuid) || record)
+  }
+  job.catch(() => {})
+  return record
+}
+
+async function deleteServerBackup(serverId, backupId) {
+  const uuid = sanitizeBackupId(backupId)
+  let backup = getBackupRecord(uuid)
+  if (!backup || backup.serverId !== serverId) {
+    // fallback: legacy id was filename
+    backup = listBackupRecords(serverId).find(b => b.name === uuid || b.fileName === uuid) || null
+    if (!backup) throw new Error('Backup not found')
+  }
+  if (backup.isLocked) throw new Error('Backup is locked')
+  if (backup.status === 'running') throw new Error('Backup is still running')
+
+  backup = saveBackupRecord({ ...backup, deletionStatus: 'deleting' })
+  emitBackupEvent(serverId, 'updated', backup.uuid, normalizeBackupPayload(backup))
+
+  try {
+    const diskPath = resolveBackupDiskPath(serverId, backup)
+    if (diskPath) {
+      try {
+        fs.unlinkSync(diskPath)
+      } catch (err) {
+        if (err && err.code === 'EACCES') {
+          const r = sudoExec(`rm -f '${diskPath}'`)
+          if (!r.ok || fs.existsSync(diskPath)) throw err
+        } else {
+          throw err
+        }
+      }
+    }
+    removeBackupRecord(backup.uuid)
+    emitBackupEvent(serverId, 'deleted', backup.uuid, { successful: true })
+    sendServerLog(serverId, `[Backup] Deleted "${backup.name}"`)
+    return { ok: true }
+  } catch (err) {
+    saveBackupRecord({ ...backup, deletionStatus: 'failed' })
+    emitBackupEvent(serverId, 'deleted', backup.uuid, { successful: false, error: err.message })
+    throw err
+  }
+}
+
+async function restoreServerBackup(serverId, backupId, opts = {}) {
+  const uuid = sanitizeBackupId(backupId)
+  let backup = getBackupRecord(uuid)
+  if (!backup || backup.serverId !== serverId) {
+    backup = listBackupRecords(serverId).find(b => b.name === uuid || b.fileName === uuid) || null
+  }
+  if (!backup) throw new Error('Backup not found')
+  if (!backup.isSuccessful && backup.status !== 'completed') throw new Error('Backup is not completed')
+
+  const srcDir = path.join(WINGS_DATA_DIR, serverId)
+  const diskPath = resolveBackupDiskPath(serverId, backup)
+  if (!diskPath) throw new Error('Backup file not found on disk')
+
+  const truncate = !!opts.truncateDirectory
+  emitBackupEvent(serverId, 'restore-started', backup.uuid, {})
+  sendServerLog(serverId, `[Backup] Restoring "${backup.name}"${truncate ? ' (truncate)...' : '...'}`)
+
+  if (truncate) {
+    try {
+      const entries = fs.readdirSync(srcDir)
+      for (const ent of entries) {
+        if (ent === 'backups') continue
+        const full = path.join(srcDir, ent)
+        try {
+          fs.rmSync(full, { recursive: true, force: true })
+        } catch (err) {
+          if (err && err.code === 'EACCES') {
+            sudoExec(`rm -rf '${full}'`)
+          }
+        }
+      }
+    } catch (err) {
+      emitBackupEvent(serverId, 'restore-completed', backup.uuid, { successful: false })
+      throw err
+    }
+  }
+
+  try {
+    const res = await runProc('tar', ['-xzf', diskPath, '-C', srcDir], { timeout: 600000 })
+    if (res.status !== 0) {
+      const msg = res.stderr || 'Restore failed'
+      emitBackupEvent(serverId, 'restore-completed', backup.uuid, { successful: false, error: msg })
+      sendServerLog(serverId, `[Backup] Restore FAILED: ${msg}`)
+      throw new Error(msg)
+    }
+    emitBackupEvent(serverId, 'restore-completed', backup.uuid, { successful: true })
+    sendServerLog(serverId, `[Backup] Restored "${backup.name}"`)
+    return { ok: true }
+  } catch (err) {
+    if (!String(err.message || '').includes('Restore FAILED')) {
+      emitBackupEvent(serverId, 'restore-completed', backup.uuid, { successful: false, error: err.message })
+    }
+    throw err
+  }
+}
+
+async function downloadServerBackup(serverId, backupId) {
+  const { dialog } = require('electron')
+  const uuid = sanitizeBackupId(backupId)
+  let backup = getBackupRecord(uuid)
+  if (!backup || backup.serverId !== serverId) {
+    backup = listBackupRecords(serverId).find(b => b.name === uuid || b.fileName === uuid) || null
+  }
+  if (!backup) throw new Error('Backup not found')
+  const src = resolveBackupDiskPath(serverId, backup)
+  if (!src) throw new Error('Backup file not found on disk')
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: path.join(os.homedir(), `${backup.name}.tar.gz`),
+    filters: [{ name: 'Gzip', extensions: ['gz'] }],
+  })
+  if (result.canceled || !result.filePath) return { canceled: true }
+  await fs.promises.copyFile(src, result.filePath)
+  return { ok: true, path: result.filePath, url: `file://${result.filePath}` }
+}
+
+function updateServerBackup(serverId, backupId, patch = {}) {
+  const uuid = sanitizeBackupId(backupId)
+  const backup = getBackupRecord(uuid)
+  if (!backup || backup.serverId !== serverId) throw new Error('Backup not found')
+  const next = { ...backup }
+  if (typeof patch.name === 'string' && patch.name.trim()) next.name = patch.name.trim()
+  if (typeof patch.isLocked === 'boolean') next.isLocked = patch.isLocked
+  if ('backupGroupUuid' in patch) next.backupGroupUuid = patch.backupGroupUuid || null
+  const saved = saveBackupRecord(next)
+  emitBackupEvent(serverId, 'updated', uuid, normalizeBackupPayload(saved))
+  return normalizeBackupPayload(saved)
+}
+
+ipcMain.handle('backup:list', (e, serverId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    if (!getServerByUuid(serverId)) return { ok: false, error: 'Server not found' }
+    const backups = listBackupsForServer(serverId)
+    return { ok: true, backups, total: backups.length }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('backup:create', async (e, serverId, opts) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const backup = await createServerBackup(serverId, opts || {}, { wait: false })
+    return { ok: true, backup }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('backup:update', (e, serverId, backupId, patch) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const backup = updateServerBackup(serverId, backupId, patch || {})
+    return { ok: true, backup }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('backup:delete', async (e, serverId, backupId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    return await deleteServerBackup(serverId, backupId)
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('backup:restore', async (e, serverId, backupId, opts) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    const server = getServerByUuid(serverId)
+    if (!server) return { ok: false, error: 'Server not found' }
+    if (server.status === 'running' || server.status === 'starting') {
+      return { ok: false, error: 'Dừng server trước khi khôi phục backup' }
+    }
+    return await restoreServerBackup(serverId, backupId, opts || {})
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('backup:download', async (e, serverId, backupId) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  try {
+    return await downloadServerBackup(serverId, backupId)
   } catch (err) { return { ok: false, error: err.message } }
 })
 

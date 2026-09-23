@@ -93,6 +93,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   wingsCreateServer: (uuid) => ipcRenderer.invoke('wings:server:create', uuid),
   wingsListServers: () => ipcRenderer.invoke('wings:servers:list'),
 
+  // Backups (Calagopus-style)
+  backupList: (serverId) => ipcRenderer.invoke('backup:list', serverId),
+  backupCreate: (serverId, opts) => ipcRenderer.invoke('backup:create', serverId, opts),
+  backupUpdate: (serverId, backupId, patch) => ipcRenderer.invoke('backup:update', serverId, backupId, patch),
+  backupDelete: (serverId, backupId) => ipcRenderer.invoke('backup:delete', serverId, backupId),
+  backupRestore: (serverId, backupId, opts) => ipcRenderer.invoke('backup:restore', serverId, backupId, opts),
+  backupDownload: (serverId, backupId) => ipcRenderer.invoke('backup:download', serverId, backupId),
+  onBackupUpdate: (callback) => {
+    const handler = (_, data) => callback(data)
+    ipcRenderer.on('backup:update', handler)
+    return () => { ipcRenderer.removeListener('backup:update', handler) }
+  },
+
   // Schedules
   scheduleList: (serverId) => ipcRenderer.invoke('schedule:list', serverId),
   scheduleCreate: (serverId, data) => ipcRenderer.invoke('schedule:create', serverId, data),

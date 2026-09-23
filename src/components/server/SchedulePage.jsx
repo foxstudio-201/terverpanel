@@ -65,7 +65,53 @@ export default function SchedulePage({ server, theme, lang }) {
   const [busyId, setBusyId] = useState(null)
   const [error, setError] = useState('')
   const [openMenu, setOpenMenu] = useState(null)
+  const [menuPos, setMenuPos] = useState(null)
+  const [modalRender, setModalRender] = useState(false)
+  const [modalClosing, setModalClosing] = useState(false)
+  const lastModalRef = useRef(null)
   const unsubRef = useRef(null)
+
+  if (modal) lastModalRef.current = modal
+
+  useEffect(() => {
+    if (modal) {
+      setModalRender(true)
+      setModalClosing(false)
+      return
+    }
+    if (!modalRender) return
+    setModalClosing(true)
+    const t = setTimeout(() => {
+      setModalRender(false)
+      setModalClosing(false)
+      lastModalRef.current = null
+    }, 220)
+    return () => clearTimeout(t)
+  }, [modal, modalRender])
+
+  const viewModal = modal || lastModalRef.current
+  const closeModal = () => setModal(null)
+
+  const closeMenu = () => {
+    setOpenMenu(null)
+    setMenuPos(null)
+  }
+
+  const toggleMenu = (e, id) => {
+    e.stopPropagation()
+    if (openMenu === id) {
+      closeMenu()
+      return
+    }
+    const r = e.currentTarget.getBoundingClientRect()
+    const menuH = 140
+    const openUp = window.innerHeight - r.bottom < menuH + 12 && r.top > menuH + 12
+    setMenuPos({
+      top: openUp ? r.top - menuH - 4 : r.bottom + 4,
+      right: Math.max(8, window.innerWidth - r.right),
+    })
+    setOpenMenu(id)
+  }
 
   const serverId = server?.id || server?.uuid
 
@@ -173,6 +219,8 @@ export default function SchedulePage({ server, theme, lang }) {
         action: st.action,
         command: st.action === 'command' ? st.command : undefined,
         power: st.action === 'power' ? st.power : undefined,
+        backupName: st.action === 'backup' ? st.backupName : undefined,
+        ignoredFiles: st.action === 'backup' ? st.ignoredFiles : undefined,
         delay: Number(st.delay) || 0,
         continueOnFailure: !!st.continueOnFailure,
       }))
@@ -184,7 +232,7 @@ export default function SchedulePage({ server, theme, lang }) {
         res = await window.electronAPI.scheduleUpdate(data.id, payload)
       }
       if (res?.ok) {
-        setModal(null)
+        closeModal()
         await load()
       } else {
         setError(res?.error || (lang === 'vi' ? 'Lưu thất bại' : 'Save failed'))
@@ -210,7 +258,7 @@ export default function SchedulePage({ server, theme, lang }) {
       const res = await window.electronAPI.scheduleRun(s.id)
       if (res && !res.ok && res.error) setError(res.error)
       await load()
-    } finally { setBusyId(null); setOpenMenu(null) }
+    } finally { setBusyId(null); closeMenu() }
   }
 
   const handleDelete = async (s) => {
@@ -221,7 +269,7 @@ export default function SchedulePage({ server, theme, lang }) {
     try {
       await window.electronAPI.scheduleDelete(s.id)
       setSchedules(prev => prev.filter(x => x.id !== s.id))
-    } finally { setBusyId(null); setOpenMenu(null) }
+    } finally { setBusyId(null); closeMenu() }
   }
 
   const actionIcon = (action) => {
@@ -267,7 +315,6 @@ export default function SchedulePage({ server, theme, lang }) {
         ) : schedules.map((s) => {
           const active = s.isActive !== false
           const running = !!s.isProcessing
-          const menuOpen = openMenu === s.id
           return (
             <div key={s.id} className="relative mb-2 px-3 py-2.5 rounded-xl" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
               <div className="flex items-center gap-3">
@@ -343,18 +390,27 @@ export default function SchedulePage({ server, theme, lang }) {
                   >
                     <PencilSimple size={13} weight="duotone" />
                   </button>
-                  <div className="relative">
+                  <div>
                     <button
-                      onClick={() => setOpenMenu(menuOpen ? null : s.id)}
+                      onClick={(e) => toggleMenu(e, s.id)}
                       className="p-1.5 rounded-lg transition-all hover:opacity-80"
                       style={{ background: cardBg, color: labelColor }}
                     >
                       <DotsThreeVertical size={13} weight="bold" />
                     </button>
-                    {menuOpen && (
+                    {openMenu === s.id && menuPos && (
                       <>
-                        <div className="fixed inset-0 z-40" onClick={() => setOpenMenu(null)} />
-                        <div className="absolute right-0 top-full z-50 mt-1 rounded-xl overflow-hidden shadow-xl" style={{ background: modalBg, border: `1px solid ${borderColor}`, minWidth: '140px' }}>
+                        <div className="fixed inset-0 z-[90]" onClick={closeMenu} />
+                        <div
+                          className="fixed z-[100] min-w-[140px] rounded-xl overflow-hidden shadow-xl"
+                          style={{
+                            top: menuPos.top,
+                            right: menuPos.right,
+                            background: modalBg,
+                            border: `1px solid ${borderColor}`,
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        >
                           <button
                             onClick={() => handleRun(s)}
                             disabled={running}
@@ -364,7 +420,7 @@ export default function SchedulePage({ server, theme, lang }) {
                             <Play size={12} weight="fill" /> {lang === 'vi' ? 'Chạy ngay' : 'Run now'}
                           </button>
                           <button
-                            onClick={() => { openEdit(s); setOpenMenu(null) }}
+                            onClick={() => { openEdit(s); closeMenu() }}
                             className="w-full px-3 py-2 text-left text-[11px] flex items-center gap-2"
                             style={{ color: textColor }}
                           >
@@ -388,18 +444,31 @@ export default function SchedulePage({ server, theme, lang }) {
         })}
       </div>
 
-      {modal && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.55)' }}>
-          <div className="w-full max-w-[560px] max-h-[85vh] rounded-2xl overflow-hidden flex flex-col" style={{ background: modalBg, border: `1px solid ${borderColor}` }}>
+      {modalRender && viewModal && (
+        <div
+          className={`modal-backdrop fixed inset-0 z-[80] flex items-center justify-center p-4${modalClosing ? ' closing' : ''}`}
+          style={{
+            background: 'rgba(0,0,0,0.7)',
+            backdropFilter: 'blur(4px)',
+            WebkitBackdropFilter: 'blur(4px)',
+            pointerEvents: modalClosing ? 'none' : 'auto',
+          }}
+          onClick={() => { if (!modalClosing) closeModal() }}
+        >
+          <div
+            className={`modal-content w-full max-w-[560px] max-h-[85vh] rounded-2xl overflow-hidden flex flex-col${modalClosing ? ' closing' : ''}`}
+            style={{ background: modalBg, border: `1px solid ${borderColor}` }}
+            onClick={e => e.stopPropagation()}
+          >
             <div className="flex items-center gap-2 px-4 py-3" style={{ borderBottom: `1px solid ${borderColor}` }}>
               <Clock size={15} weight="duotone" style={{ color: '#a78bfa' }} />
               <h3 className="text-xs font-bold" style={{ color: textColor }}>
-                {modal.mode === 'create'
+                {viewModal.mode === 'create'
                   ? (lang === 'vi' ? 'Tạo lịch trình' : 'Create schedule')
                   : (lang === 'vi' ? 'Sửa lịch trình' : 'Edit schedule')}
               </h3>
               <div className="flex-1" />
-              <button onClick={() => setModal(null)} className="p-1 rounded-lg" style={{ color: labelColor }}>
+              <button onClick={closeModal} className="p-1 rounded-lg" style={{ color: labelColor }}>
                 <X size={15} weight="bold" />
               </button>
             </div>
@@ -410,7 +479,7 @@ export default function SchedulePage({ server, theme, lang }) {
                   {lang === 'vi' ? 'Tên' : 'Name'}
                 </label>
                 <input
-                  value={modal.data.name}
+                  value={viewModal.data.name}
                   onChange={e => updateData({ name: e.target.value })}
                   placeholder={lang === 'vi' ? 'Backup hàng đêm' : 'Nightly backup'}
                   className="w-full px-3 py-2 rounded-lg text-[11px] outline-none"
@@ -423,11 +492,11 @@ export default function SchedulePage({ server, theme, lang }) {
                   Cron {lang === 'vi' ? '(5 trường: phút giờ ngày tháng thứ)' : '(5 fields: min hour dom month dow)'}
                 </label>
                 <input
-                  value={modal.data.cron}
+                  value={viewModal.data.cron}
                   onChange={e => updateData({ cron: e.target.value })}
                   placeholder="*/5 * * * *"
                   className="w-full px-3 py-2 rounded-lg text-[11px] outline-none font-mono"
-                  style={{ background: inputBg, border: `1px solid ${preview.valid || !modal.data.cron ? borderColor : '#ef444466'}`, color: textColor }}
+                  style={{ background: inputBg, border: `1px solid ${preview.valid || !viewModal.data.cron ? borderColor : '#ef444466'}`, color: textColor }}
                 />
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
                   {PRESETS.map(p => (
@@ -435,7 +504,7 @@ export default function SchedulePage({ server, theme, lang }) {
                       key={p.label}
                       onClick={() => updateData({ cron: p.label })}
                       className="text-[9px] px-2 py-1 rounded-md font-mono transition-all hover:opacity-80"
-                      style={{ background: modal.data.cron === p.label ? '#a78bfa25' : cardBg, border: `1px solid ${borderColor}`, color: modal.data.cron === p.label ? '#a78bfa' : labelColor }}
+                      style={{ background: viewModal.data.cron === p.label ? '#a78bfa25' : cardBg, border: `1px solid ${borderColor}`, color: viewModal.data.cron === p.label ? '#a78bfa' : labelColor }}
                       title={lang === 'vi' ? p.vi : p.en}
                     >
                       {p.label}
@@ -444,7 +513,7 @@ export default function SchedulePage({ server, theme, lang }) {
                 </div>
                 <div className="mt-1.5 flex items-center gap-3 text-[10px]" style={{ color: labelColor }}>
                   <span style={{ color: preview.valid ? '#22c55e' : '#ef4444' }}>
-                    {modal.data.cron
+                    {viewModal.data.cron
                       ? (preview.valid ? `✓ ${preview.human || preview.valid}` : (lang === 'vi' ? '✗ Cron không hợp lệ' : '✗ Invalid cron'))
                       : ''}
                   </span>
@@ -457,7 +526,7 @@ export default function SchedulePage({ server, theme, lang }) {
               <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: textColor }}>
                 <input
                   type="checkbox"
-                  checked={modal.data.isActive !== false}
+                  checked={viewModal.data.isActive !== false}
                   onChange={e => updateData({ isActive: e.target.checked })}
                   className="rounded"
                 />
@@ -467,7 +536,7 @@ export default function SchedulePage({ server, theme, lang }) {
               <div>
                 <div className="flex items-center gap-2 mb-1.5">
                   <label className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: labelColor }}>
-                    {lang === 'vi' ? `Các bước (${modal.data.steps.length})` : `Steps (${modal.data.steps.length})`}
+                    {lang === 'vi' ? `Các bước (${viewModal.data.steps.length})` : `Steps (${viewModal.data.steps.length})`}
                   </label>
                   <div className="flex-1" />
                   <button onClick={addStep} className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md font-semibold" style={{ background: '#a78bfa20', color: '#a78bfa' }}>
@@ -476,7 +545,7 @@ export default function SchedulePage({ server, theme, lang }) {
                 </div>
 
                 <div className="space-y-2">
-                  {modal.data.steps.map((st, idx) => (
+                  {viewModal.data.steps.map((st, idx) => (
                     <div key={st.id || idx} className="p-2.5 rounded-xl" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
                       <div className="flex items-center gap-2 mb-2">
                         <span className="text-[10px] font-bold w-5 text-center rounded" style={{ background: '#a78bfa20', color: '#a78bfa' }}>{idx + 1}</span>
@@ -496,10 +565,10 @@ export default function SchedulePage({ server, theme, lang }) {
                         <button onClick={() => moveStep(idx, -1)} disabled={idx === 0} className="p-1 disabled:opacity-30" style={{ color: labelColor }} title="Up">
                           <CaretLeft size={12} weight="bold" style={{ transform: 'rotate(-90deg)' }} />
                         </button>
-                        <button onClick={() => moveStep(idx, 1)} disabled={idx === modal.data.steps.length - 1} className="p-1 disabled:opacity-30" style={{ color: labelColor }} title="Down">
+                        <button onClick={() => moveStep(idx, 1)} disabled={idx === viewModal.data.steps.length - 1} className="p-1 disabled:opacity-30" style={{ color: labelColor }} title="Down">
                           <CaretRight size={12} weight="bold" style={{ transform: 'rotate(-90deg)' }} />
                         </button>
-                        <button onClick={() => removeStep(idx)} disabled={modal.data.steps.length <= 1} className="p-1 disabled:opacity-30" style={{ color: '#ef4444' }} title="Remove">
+                        <button onClick={() => removeStep(idx)} disabled={viewModal.data.steps.length <= 1} className="p-1 disabled:opacity-30" style={{ color: '#ef4444' }} title="Remove">
                           <Trash size={12} weight="duotone" />
                         </button>
                       </div>
@@ -572,10 +641,10 @@ export default function SchedulePage({ server, theme, lang }) {
 
             <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: `1px solid ${borderColor}` }}>
               <div className="flex-1" />
-              <button onClick={() => setModal(null)} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold" style={{ background: borderColor, color: labelColor }}>
+              <button onClick={closeModal} disabled={modalClosing} className="px-3 py-1.5 rounded-lg text-[11px] font-semibold" style={{ background: borderColor, color: labelColor }}>
                 {lang === 'vi' ? 'Hủy' : 'Cancel'}
               </button>
-              <button onClick={handleSave} className="px-4 py-1.5 rounded-lg text-[11px] font-semibold" style={{ background: '#a78bfa', color: '#fff' }}>
+              <button onClick={handleSave} disabled={modalClosing} className="px-4 py-1.5 rounded-lg text-[11px] font-semibold" style={{ background: '#a78bfa', color: '#fff' }}>
                 {lang === 'vi' ? 'Lưu' : 'Save'}
               </button>
             </div>
