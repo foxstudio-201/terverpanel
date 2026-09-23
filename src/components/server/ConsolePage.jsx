@@ -59,7 +59,7 @@ export default function ConsolePage({ server, theme, lang, onServerUpdate }) {
   const [hasSelection, setHasSelection] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchText, setSearchText] = useState('')
-  const [fontSize, setFontSize] = useState(14)
+  const [fontSize, setFontSize] = useState(12)
   const [wsPing, setWsPing] = useState(0)
 
   const termRef = useRef(null)
@@ -72,7 +72,7 @@ export default function ConsolePage({ server, theme, lang, onServerUpdate }) {
   const autoScrollRef = useRef(true)
   const commandRef = useRef('')
   const wsPongAtRef = useRef(0)
-  const fontSizeRef = useRef(14)
+  const fontSizeRef = useRef(12)
   const lastSnapRef = useRef('')
 
   commandRef.current = command
@@ -150,11 +150,27 @@ export default function ConsolePage({ server, theme, lang, onServerUpdate }) {
     return term
   }, [])
 
+function isTpsProbeNoise(text) {
+  const s = String(text ?? '')
+  if (!s) return false
+  if (/^\[(Install|Daemon|Schedule|Terver)/i.test(s)) return false
+  return /Mean TPS:\s*[\d.]+/i.test(s)
+    || /Mean tick time:/i.test(s)
+    || /System chat:.*(?:Overall|Dim )/i.test(s)
+    || /TPS from last/i.test(s)
+    || /\bTPS\s*[:=]\s*[\d.]+/i.test(s)
+    || /\bMSPT\s*[:=]?\s*[\d.]+/i.test(s)
+    || /\bavg\s+TPS\s*[:=]?\s*[\d.]+/i.test(s)
+}
+
   const writeLine = useCallback((text, { prelude = false, dedupeKey = null } = {}) => {
     const term = termRef.current
     if (!term) return
     const rawStr = String(text ?? '')
-    const normKey = rawStr.replace(/\r/g, '').replace(/\x1b\[\?25h/g, '').replace(/\x1b\[\?25l/g, '').trimEnd()
+    const keptLines = rawStr.split(/\r?\n/).filter((l) => !isTpsProbeNoise(l))
+    if (!keptLines.some((l) => l.length)) return
+    const filtered = keptLines.join('\n')
+    const normKey = filtered.replace(/\r/g, '').replace(/\x1b\[\?25h/g, '').replace(/\x1b\[\?25l/g, '').trimEnd()
     const key = normKey ? `line:${normKey}` : (dedupeKey || null)
     if (key) {
       if (seenLinesRef.current.has(key)) return
@@ -163,7 +179,7 @@ export default function ConsolePage({ server, theme, lang, onServerUpdate }) {
         seenLinesRef.current = new Set([...seenLinesRef.current].slice(-2000))
       }
     }
-    let processed = rawStr.replace(/\x1b\[\?25h/g, '').replace(/\x1b\[\?25l/g, '')
+    let processed = filtered.replace(/\x1b\[\?25h/g, '').replace(/\x1b\[\?25l/g, '')
     processed = processed
       .replace(/container@pterodactyl~/g, 'container@terver')
       .replace(/container@calagopus~/g, 'container@terver')

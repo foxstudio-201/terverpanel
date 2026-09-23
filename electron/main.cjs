@@ -944,6 +944,19 @@ function sendServerProgress(serverId, percent, message) {
   }
 }
 
+function isTpsProbeNoise(message) {
+  const s = String(message ?? '')
+  if (!s) return false
+  if (/^\[(Install|Daemon|Schedule|Terver)/i.test(s)) return false
+  return /Mean TPS:\s*[\d.]+/i.test(s)
+    || /Mean tick time:/i.test(s)
+    || /System chat:.*(?:Overall|Dim )/i.test(s)
+    || /TPS from last/i.test(s)
+    || /\bTPS\s*[:=]\s*[\d.]+/i.test(s)
+    || /\bMSPT\s*[:=]?\s*[\d.]+/i.test(s)
+    || /\bavg\s+TPS\s*[:=]?\s*[\d.]+/i.test(s)
+}
+
 function sendServerLog(serverId, message) {
   let msg = String(message ?? '')
   msg = msg
@@ -953,13 +966,14 @@ function sendServerLog(serverId, message) {
     .replace(/calagopus daemon/gi, 'Terver Daemon')
     .replace(/container@calagopus~/g, 'container@terver')
     .replace(/@calagopus~/g, '@terver')
+  ingestTpsLine(serverId, message)
+  if (isTpsProbeNoise(msg)) return
   const entry = { serverId, message: msg, timestamp: Date.now() }
   if (!global._serverLogs) global._serverLogs = {}
   if (!global._serverLogs[serverId]) global._serverLogs[serverId] = []
   global._serverLogs[serverId].push(entry)
   if (global._serverLogs[serverId].length > 500) global._serverLogs[serverId] = global._serverLogs[serverId].slice(-500)
   persistServerLogs(serverId)
-  ingestTpsLine(serverId, message)
   if (mainWindow && mainWindow.webContents) {
     mainWindow.webContents.send('server:log', entry)
   }
@@ -1308,7 +1322,8 @@ ipcMain.handle('server:install', async (e, serverId) => {
       'gamemode=survival',
       'difficulty=easy',
       'max-players=20',
-      'online-mode=true',
+      'online-mode=' + (server.onlineMode === false ? 'false' : 'true'),
+      'motd=' + String(server.motd || 'A Minecraft Server').replace(/\r?\n/g, ' '),
       'enable-query=true',
       'eula=true',
     ].join('\n')

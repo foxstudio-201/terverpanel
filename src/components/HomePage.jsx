@@ -111,6 +111,7 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
   const [selectedDockerImage, setSelectedDockerImage] = useState('')
   const [resources, setResources] = useState(null)
   const [eggConfigVars, setEggConfigVars] = useState({})
+  const [serverConfig, setServerConfig] = useState({ eula: true, onlineMode: true, motd: 'A Minecraft Server' })
   const textColor = theme === 'light' ? '#111' : '#fff'
   const labelColor = theme === 'light' ? '#555' : 'rgba(255,255,255,0.6)'
   const modalBg = theme === 'light' ? '#fff' : '#141414'
@@ -260,8 +261,14 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
           if ('VANILLA_VERSION' in cfg) cfg.VANILLA_VERSION = selectedVersion
           if ('DL_VERSION' in cfg) cfg.DL_VERSION = selectedVersion
         }
+        if ('EULA' in cfg) cfg.EULA = String(!!serverConfig.eula)
+        if ('ONLINE_MODE' in cfg) cfg.ONLINE_MODE = String(!!serverConfig.onlineMode)
+        if ('MOTD' in cfg) cfg.MOTD = serverConfig.motd || ''
         return cfg
       })(),
+      eula: !!serverConfig.eula,
+      onlineMode: !!serverConfig.onlineMode,
+      motd: serverConfig.motd || '',
       status: 'installing',
     }
     if (isElectron) {
