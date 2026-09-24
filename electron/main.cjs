@@ -1144,7 +1144,7 @@ async function startLocalServer(serverId) {
     '-Dterminal.ansi=true',
   ]
   if (launch.mode === 'unix_args') {
-    args.push('@unix_args.txt')
+    args.push('@unix_args.txt', 'nogui')
   } else {
     args.push('-jar', launch.useJar, 'nogui')
   }
