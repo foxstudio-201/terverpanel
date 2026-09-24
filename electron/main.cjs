@@ -1082,6 +1082,28 @@ function localServerState(serverId) {
   return 'running'
 }
 
+function isInstallerJar(name) {
+  return /installer/i.test(String(name || ''))
+}
+
+function pickBasicLaunch(serverDir, eggConfig) {
+  const jarFile = eggConfig?.SERVER_JARFILE || 'server.jar'
+  const jarPath = path.join(serverDir, jarFile)
+  const unixArgs = path.join(serverDir, 'unix_args.txt')
+  const hasUnixArgs = (() => {
+    try { return fs.statSync(unixArgs).isFile() } catch { return false }
+  })()
+  if (hasUnixArgs) return { mode: 'unix_args', useJar: null }
+  if (fs.existsSync(jarPath)) return { mode: 'jar', useJar: jarFile }
+  let entries = []
+  try { entries = fs.readdirSync(serverDir) } catch {}
+  const jars = entries.filter(f => f.endsWith('.jar') && !isInstallerJar(f))
+  const forgeServer = jars.find(f => /-server\.jar$/i.test(f) && /forge/i.test(f))
+  if (forgeServer) return { mode: 'jar', useJar: forgeServer }
+  if (jars.length) return { mode: 'jar', useJar: jars[0] }
+  return { mode: 'missing', useJar: null }
+}
+
 async function startLocalServer(serverId) {
   if (_localProcs.has(serverId)) return { ok: true, already: true }
   const server = getServerByUuid(serverId)
@@ -1093,13 +1115,10 @@ async function startLocalServer(serverId) {
   ensureEula(serverId)
 
   const eggConfig = server.config || {}
-  const jarFile = eggConfig.SERVER_JARFILE || 'server.jar'
-  const jarPath = path.join(serverDir, jarFile)
-  if (!fs.existsSync(jarPath)) {
-    const anyJar = fs.readdirSync(serverDir).find(f => f.endsWith('.jar'))
-    if (!anyJar) return { ok: false, error: `Missing ${jarFile}. Install the server first.` }
+  const launch = pickBasicLaunch(serverDir, eggConfig)
+  if (launch.mode === 'missing') {
+    return { ok: false, error: 'Missing server jar. Install the server first.' }
   }
-  const useJar = fs.existsSync(jarPath) ? jarFile : fs.readdirSync(serverDir).find(f => f.endsWith('.jar'))
 
   updateServerConfig(serverId, { status: 'starting' })
   appendServerHistory(serverId, 'start')
@@ -1123,8 +1142,12 @@ async function startLocalServer(serverId) {
     '-XX:MaxRAMPercentage=95.0',
     '-Dterminal.jline=false',
     '-Dterminal.ansi=true',
-    '-jar', useJar, 'nogui',
   ]
+  if (launch.mode === 'unix_args') {
+    args.push('@unix_args.txt')
+  } else {
+    args.push('-jar', launch.useJar, 'nogui')
+  }
 
   sendServerLog(serverId, `[Daemon] ${javaBin} ${args.join(' ')}`)
   emitBasicStatus(serverId, 'starting')
@@ -1280,10 +1303,18 @@ function rewriteBasicInstallScript(script, serverDir) {
     'apt() { if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then echo "[basic] skip apt (curl/jq present): $*"; return 0; fi; echo "[basic] apt not available (need root or preinstall curl+jq): $*"; return 1; }',
     'apt-get() { apt "$@"; }',
     'export DEBIAN_FRONTEND=noninteractive',
+    // Never open interactive GUI installers (Forge etc.) from egg scripts
+    'export DISPLAY=',
+    'export CI=true',
     '',
   ].join('\n')
   s = s.replace(/^#!.*\r?\n/, '')
-  return '#!/usr/bin/env bash\n' + shim + s
+  // Force headless Forge installer if script ever calls it without --installServer
+  s = s.replace(
+    /java\s+-jar\s+installer\.jar(?!\s+--installServer)/g,
+    'java -jar installer.jar --installServer'
+  )
+  return '#!/usr/bin/env bash\nset -o pipefail\n' + shim + s
 }
 
 function buildEggEnv(server, eggData) {
@@ -1307,7 +1338,55 @@ function buildEggEnv(server, eggData) {
   return env
 }
 
-function runBasicInstallScript(serverId, serverDir, eggData, env) {
+function buildBasicInstallEnv(baseEnv, extra = {}) {
+  const env = { ...process.env, ...baseEnv, ...extra }
+  // Prefer managed Java on PATH so egg scripts can run `java -jar installer.jar --installServer`
+  try {
+    const cachedBins = []
+    for (const [, bin] of _basicJavaCache) {
+      if (bin && fs.existsSync(bin)) cachedBins.push(path.dirname(bin))
+    }
+    if (cachedBins.length) {
+      env.PATH = [...cachedBins, env.PATH || ''].join(path.delimiter)
+      env.JAVA_HOME = path.dirname(path.dirname(cachedBins[0]))
+    }
+  } catch {}
+  return env
+}
+
+async function ensureBasicInstallTools(onLog) {
+  const toolsDir = path.join(BASIC_JAVA_DIR, 'tools')
+  try { await fs.promises.mkdir(toolsDir, { recursive: true }) } catch {}
+  const binDir = path.join(toolsDir, process.platform === 'win32' ? '' : 'bin')
+  if (process.platform !== 'win32') {
+    try { await fs.promises.mkdir(binDir, { recursive: true }) } catch {}
+  }
+  const pathDirs = process.platform === 'win32' ? [toolsDir] : [binDir]
+  let jqPath = null
+  const jqBin = process.platform === 'win32' ? path.join(toolsDir, 'jq.exe') : path.join(binDir, 'jq')
+  if (fs.existsSync(jqBin)) {
+    jqPath = jqBin
+  } else {
+    const url = process.platform === 'win32'
+      ? 'https://github.com/jqlang/jq/releases/latest/download/jq-windows-amd64.exe'
+      : process.arch === 'arm64'
+        ? 'https://github.com/jqlang/jq/releases/latest/download/jq-linux-arm64'
+        : 'https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64'
+    try {
+      if (onLog) onLog('[Install] Downloading jq (basic tools)...')
+      await downloadFile(url, jqBin, () => {})
+      if (process.platform !== 'win32') {
+        try { await fs.promises.chmod(jqBin, 0o755) } catch {}
+      }
+      jqPath = jqBin
+    } catch (err) {
+      if (onLog) onLog(`[Install] WARNING: jq download failed: ${err.message}`)
+    }
+  }
+  return { toolsDir, binDir, jqPath, pathDirs }
+}
+
+function runBasicInstallScript(serverId, serverDir, eggData, env, pathDirs = []) {
   return new Promise((resolve, reject) => {
     findBasicShell().then((shell) => {
       if (!shell) {
@@ -1321,9 +1400,13 @@ function runBasicInstallScript(serverId, serverDir, eggData, env) {
         let stdoutBuf = ''
         let proc
         try {
+          const spawnEnv = buildBasicInstallEnv(env)
+          if (pathDirs && pathDirs.length) {
+            spawnEnv.PATH = [...pathDirs, spawnEnv.PATH || ''].join(path.delimiter)
+          }
           proc = spawn(shell, [scriptPath], {
             cwd: serverDir,
-            env: { ...process.env, ...env },
+            env: spawnEnv,
             windowsHide: true,
           })
         } catch (err) { reject(err); return }
@@ -1350,6 +1433,41 @@ function runBasicInstallScript(serverId, serverDir, eggData, env) {
       })
     }).catch(reject)
   })
+}
+
+async function finishForgeBasicInstall(serverId, serverDir, javaBin) {
+  try {
+    const forgeLib = path.join(serverDir, 'libraries', 'net', 'minecraftforge')
+    const hasLibs = (() => { try { return fs.existsSync(forgeLib) && fs.readdirSync(forgeLib).length > 0 } catch { return false } })()
+    const installerPath = path.join(serverDir, 'installer.jar')
+    const hasInstaller = fs.existsSync(installerPath)
+    if (hasLibs) {
+      sendServerLog(serverId, '[Install] Forge libraries present (headless install OK)')
+      return
+    }
+    if (!hasInstaller) {
+      sendServerLog(serverId, '[Install] WARNING: Forge incomplete — no libraries and no installer.jar')
+      return
+    }
+    if (!javaBin) throw new Error('No Java available for Forge headless install')
+    sendServerLog(serverId, '[Install] Running Forge installer headless: java -jar installer.jar --installServer')
+    const r = await runProc(javaBin, ['-jar', 'installer.jar', '--installServer'], {
+      cwd: serverDir,
+      timeout: 600000,
+      env: { ...process.env, DISPLAY: '', CI: 'true' },
+    })
+    if (r.stdout) for (const line of r.stdout.split(/\r?\n/)) if (line) sendServerLog(serverId, `[Install] ${line}`)
+    if (r.stderr) for (const line of r.stderr.split(/\r?\n/)) if (line) sendServerLog(serverId, `[Install] ${line}`)
+    if (r.status !== 0) {
+      throw new Error(`Forge installer --installServer exited with code ${r.status}`)
+    }
+    const hasLibs2 = (() => { try { return fs.existsSync(forgeLib) && fs.readdirSync(forgeLib).length > 0 } catch { return false } })()
+    if (!hasLibs2) throw new Error('Forge installer finished but libraries/ is still empty')
+    sendServerLog(serverId, '[Install] Forge headless install complete')
+  } catch (err) {
+    sendServerLog(serverId, `[Install] ERROR: Forge finish failed: ${err.message}`)
+    throw err
+  }
 }
 
 function runProc(cmd, args, opts = {}) {
@@ -1726,6 +1844,15 @@ async function doInstallServer(e, serverId) {
 
       if (basic) {
         sendServerLog(server.id, `[Install] Installer: local shell (rewritten /mnt/server → ${serverDir})`)
+        sendServerProgress(server.id, 8, 'Preparing managed Java + tools...')
+        const needJava = basicJavaNeed(server)
+        let installJavaBin
+        try {
+          installJavaBin = await ensureBasicJava(needJava, (msg) => sendServerLog(server.id, `[Java] ${msg}`))
+        } catch (err) {
+          throw new Error(`Managed Java prepare failed: ${err.message}`)
+        }
+        const tools = await ensureBasicInstallTools((msg) => sendServerLog(server.id, msg))
         sendServerProgress(server.id, 10, 'Running egg install script...')
         const envObj = {}
         for (let i = 0; i < envVars.length; i += 2) {
@@ -1734,9 +1861,20 @@ async function doInstallServer(e, serverId) {
             envObj[envVars[i + 1].slice(0, eq)] = envVars[i + 1].slice(eq + 1)
           }
         }
-        await runBasicInstallScript(server.id, serverDir, eggData, envObj)
+        const javaDir = installJavaBin ? path.dirname(installJavaBin) : null
+        await runBasicInstallScript(
+          server.id,
+          serverDir,
+          eggData,
+          envObj,
+          [javaDir, tools.binDir, tools.toolsDir].filter(Boolean)
+        )
         sendServerProgress(server.id, 85, 'Install script completed')
         sendServerLog(server.id, '[Install] Install script completed successfully')
+        // Forge safety: if script left only installer.jar, run headless --installServer
+        if (eggName === 'forge') {
+          await finishForgeBasicInstall(server.id, serverDir, installJavaBin)
+        }
       } else {
       sendServerLog(server.id, `[Install] Installer container: ${installerContainer}`)
 
@@ -1829,23 +1967,32 @@ async function doInstallServer(e, serverId) {
     if (javaFixedInstall) sendServerLog(server.id, `[Install] Using Docker image ${javaFixedInstall.to} (needs Java ${javaFixedInstall.need})`)
 
     if (eggName === 'forge') {
-      const forgeArgsGlob = fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge')).flatMap(dir => {
-        try { return fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', dir)).map(sub => path.join(dir, sub)) } catch { return [] }
-      }).find(d => { try { return fs.statSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', d, 'unix_args.txt')).isFile() } catch { return false } })
-      if (forgeArgsGlob) {
-        const src = path.join('libraries', 'net', 'minecraftforge', forgeArgsGlob, 'unix_args.txt')
-        const dest = path.join(serverDir, 'unix_args.txt')
-        if (!fs.existsSync(dest)) {
-          fs.copyFileSync(path.join(serverDir, src), dest)
-          sendServerLog(server.id, `[Install] Created unix_args.txt symlink from ${src}`)
+      try {
+        const forgeLibRoot = path.join(serverDir, 'libraries', 'net', 'minecraftforge')
+        if (!fs.existsSync(forgeLibRoot)) {
+          sendServerLog(server.id, '[Install] WARNING: Forge libraries not found (unix_args skip)')
+        } else {
+          const forgeArgsGlob = fs.readdirSync(forgeLibRoot).flatMap(dir => {
+            try { return fs.readdirSync(path.join(forgeLibRoot, dir)).map(sub => path.join(dir, sub)) } catch { return [] }
+          }).find(d => { try { return fs.statSync(path.join(forgeLibRoot, d, 'unix_args.txt')).isFile() } catch { return false } })
+          if (forgeArgsGlob) {
+            const src = path.join('libraries', 'net', 'minecraftforge', forgeArgsGlob, 'unix_args.txt')
+            const dest = path.join(serverDir, 'unix_args.txt')
+            if (!fs.existsSync(dest)) {
+              fs.copyFileSync(path.join(serverDir, src), dest)
+              sendServerLog(server.id, `[Install] Created unix_args.txt from ${src}`)
+            }
+            const serverJarCandidates = fs.readdirSync(path.join(forgeLibRoot, forgeArgsGlob)).filter(f => f.endsWith('-server.jar') && !isInstallerJar(f))
+            if (serverJarCandidates.length > 0 && !fs.existsSync(path.join(serverDir, jarFile))) {
+              fs.copyFileSync(path.join(forgeLibRoot, forgeArgsGlob, serverJarCandidates[0]), path.join(serverDir, jarFile))
+              sendServerLog(server.id, `[Install] Created ${jarFile} from ${serverJarCandidates[0]}`)
+            }
+          } else {
+            sendServerLog(server.id, '[Install] WARNING: Could not find Forge unix_args.txt in libraries')
+          }
         }
-        const serverJarCandidates = fs.readdirSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', forgeArgsGlob)).filter(f => f.endsWith('-server.jar'))
-        if (serverJarCandidates.length > 0 && !fs.existsSync(path.join(serverDir, jarFile))) {
-          fs.copyFileSync(path.join(serverDir, 'libraries', 'net', 'minecraftforge', forgeArgsGlob, serverJarCandidates[0]), path.join(serverDir, jarFile))
-          sendServerLog(server.id, `[Install] Created ${jarFile} from ${serverJarCandidates[0]}`)
-        }
-      } else {
-        sendServerLog(server.id, '[Install] WARNING: Could not find Forge unix_args.txt in libraries')
+      } catch (err) {
+        sendServerLog(server.id, `[Install] WARNING: Forge post-process: ${err.message}`)
       }
     }
 
