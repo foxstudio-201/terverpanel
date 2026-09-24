@@ -4,6 +4,7 @@ import { t } from './i18n/translations'
 import { House, Gear, Heart, Cube, List, Terminal, Files, Database, Clock, Users, Archive, Network, Play, GearSix, ArrowLeft, ChartLineUp } from '@phosphor-icons/react'
 import TitleBar from './components/TitleBar'
 import CloseModal from './components/CloseModal'
+import ModeSelectModal from './components/ModeSelectModal'
 import TooltipProvider from './components/ui/TooltipProvider'
 import ToastHost from './components/ui/ToastHost'
 import NodePage from './components/NodePage'
@@ -46,6 +47,8 @@ function AppContent() {
   const [showCloseModal, setShowCloseModal] = useState(false)
   const [version, setVersion] = useState('')
   const [dockerToast, setDockerToast] = useState(null)
+  const [appMode, setAppMode] = useState('')
+  const [modeLoaded, setModeLoaded] = useState(false)
 
   const [phase, setPhase] = useState('startup-spinner')
   const [displaySession, setDisplaySession] = useState(null)
@@ -58,6 +61,26 @@ function AppContent() {
   const startupDone = useRef(false)
 
   const isElectron = typeof window !== 'undefined' && window.electronAPI
+  const isBasic = appMode === 'basic'
+
+  useEffect(() => {
+    const loadMode = async () => {
+      if (!isElectron) {
+        try {
+          const m = localStorage.getItem('terver_appMode') || ''
+          setAppMode(m)
+        } catch {}
+        setModeLoaded(true)
+        return
+      }
+      try {
+        const s = await window.electronAPI.getSettings()
+        setAppMode(s?.appMode || '')
+      } catch {}
+      setModeLoaded(true)
+    }
+    loadMode()
+  }, [isElectron])
 
   useEffect(() => {
     const checkSession = async () => {
@@ -97,7 +120,7 @@ function AppContent() {
   }, [])
 
   useEffect(() => {
-    if (!isElectron || !startupDone.current) return
+    if (!isElectron || !startupDone.current || isBasic) return
     const checkDocker = async () => {
       try {
         const res = await window.electronAPI.checkDocker()
@@ -112,7 +135,7 @@ function AppContent() {
     }
     const timer = setTimeout(checkDocker, 1500)
     return () => clearTimeout(timer)
-  }, [isElectron, displaySession])
+  }, [isElectron, displaySession, isBasic])
 
   const refreshSidebarServers = () => {
     if (!isElectron) return
@@ -367,6 +390,7 @@ function AppContent() {
                   style={{
                     background: activePage === 'docker' ? 'rgba(167,139,250,0.12)' : 'transparent',
                     color: activePage === 'docker' ? '#a78bfa' : labelColor,
+                    display: isBasic ? 'none' : undefined,
                   }}
                 >
                   <Cube size={18} weight="duotone" />
@@ -403,8 +427,8 @@ function AppContent() {
           <div className={`h-full ${transitionClass}`}>
             {displayPage === 'servers' && <HomePage theme={theme} lang={lang} onServerCreated={refreshSidebarServers} onSelectServer={handleSelectServer} />}
             {displayPage === 'donate' && <DonatePage theme={theme} lang={lang} />}
-            {displayPage === 'docker' && <NodePage theme={theme} lang={lang} />}
-            {displayPage === 'settings' && <SettingsPage theme={theme} lang={lang} />}
+            {displayPage === 'docker' && !isBasic && <NodePage theme={theme} lang={lang} />}
+            {displayPage === 'settings' && <SettingsPage theme={theme} lang={lang} onAppModeChange={setAppMode} appMode={appMode} />}
             {isInServerPanel && selectedSidebarServer && (
               <ServerPanel key={selectedSidebarServer.id} server={selectedSidebarServer} theme={theme} lang={lang} displayPage={displayPage} onBack={handleBackFromServer} onServerDeleted={refreshSidebarServers} onServerUpdate={(srv) => setSelectedSidebarServer(srv)} />
             )}
@@ -454,6 +478,9 @@ function AppContent() {
       {renderContent()}
       {showCloseModal && (
         <CloseModal onClose={() => setShowCloseModal(false)} />
+      )}
+      {modeLoaded && !appMode && (
+        <ModeSelectModal onChosen={(mode) => setAppMode(mode)} />
       )}
       <TooltipProvider />
     </div>

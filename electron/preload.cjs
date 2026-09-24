@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   quitApp: () => ipcRenderer.send('quit-app'),
 
   getVersion: () => ipcRenderer.invoke('app:version'),
+  getPlatform: () => ipcRenderer.invoke('app:platform'),
   clipboardWrite: (text) => ipcRenderer.invoke('clipboard:write', text),
 
   getSettings: () => ipcRenderer.invoke('settings:get'),

@@ -26,14 +26,22 @@ const pathLabels = {
   logs: { vi: 'Logs', en: 'Logs directory' },
 }
 
-export default function SettingsPage({ theme, lang }) {
+export default function SettingsPage({ theme, lang, onAppModeChange, appMode: appModeProp }) {
   const { setLang, setTheme } = useApp()
   const [paths, setPaths] = useState(defaultPaths)
   const [autoStart, setAutoStart] = useState({ docker: true, wings: true, cloudflare: false, database: true })
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [appMode, setAppMode] = useState(appModeProp || '')
+  const [platform, setPlatform] = useState('')
+  const [modeChanged, setModeChanged] = useState(false)
 
   const isElectron = typeof window !== 'undefined' && window.electronAPI
+  const advancedLocked = platform === 'win32'
+
+  useEffect(() => {
+    if (appModeProp) setAppMode(appModeProp)
+  }, [appModeProp])
 
   useEffect(() => {
     const load = async () => {
@@ -42,6 +50,10 @@ export default function SettingsPage({ theme, lang }) {
         if (s) {
           if (s.paths) setPaths(prev => ({ ...prev, ...s.paths }))
           if (s.autoStart) setAutoStart(prev => ({ ...prev, ...s.autoStart }))
+          if (s.appMode) setAppMode(s.appMode)
+        }
+        if (window.electronAPI.getPlatform) {
+          try { setPlatform((await window.electronAPI.getPlatform()) || '') } catch {}
         }
       }
     }
@@ -53,11 +65,23 @@ export default function SettingsPage({ theme, lang }) {
     setSaving(true)
     try {
       const s = await window.electronAPI.getSettings()
-      await window.electronAPI.saveSettings({ ...s, paths, autoStart })
+      await window.electronAPI.saveSettings({ ...s, paths, autoStart, appMode })
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch {}
     setSaving(false)
+  }
+
+  const changeMode = async (mode) => {
+    if (mode === 'advanced' && advancedLocked) return
+    if (mode === appMode) return
+    try {
+      if (isElectron) await window.electronAPI.saveSettings({ appMode: mode })
+      setAppMode(mode)
+      onAppModeChange?.(mode)
+      setModeChanged(true)
+      setTimeout(() => setModeChanged(false), 2500)
+    } catch {}
   }
 
   const updateAutoStart = (key, val) => setAutoStart(prev => ({ ...prev, [key]: val }))
@@ -105,6 +129,40 @@ export default function SettingsPage({ theme, lang }) {
                 {t(lang, 'settings.theme.light')}
               </button>
             </div>
+          </div>
+
+          {/* ── Run mode (basic / advanced) ── */}
+          <div className="rounded-xl p-5" style={{ background: sectionBg, border: `1px solid ${inputBorder}` }}>
+            <label className="block text-sm font-medium mb-1" style={{ color: labelColor }}>
+              {t(lang, 'settings.mode')}
+            </label>
+            <p className="text-xs mb-3" style={{ color: labelColor, opacity: 0.7 }}>
+              {t(lang, 'mode.changeLater')}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => changeMode('basic')}
+                className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${appMode === 'basic' ? 'bg-purple-500/20 border-2 border-purple-500/50 text-purple-400' : 'border hover:border-white/20'}`}
+                style={{ borderColor: appMode !== 'basic' ? inputBorder : undefined, color: appMode !== 'basic' ? labelColor : undefined }}
+              >
+                {t(lang, 'settings.mode.basic')}
+              </button>
+              <button
+                onClick={() => changeMode('advanced')}
+                disabled={advancedLocked}
+                className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${appMode === 'advanced' && !advancedLocked ? 'bg-purple-500/20 border-2 border-purple-500/50 text-purple-400' : 'border hover:border-white/20'} ${advancedLocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+                style={{ borderColor: appMode !== 'advanced' ? inputBorder : undefined, color: appMode !== 'advanced' ? labelColor : undefined }}
+                title={advancedLocked ? t(lang, 'settings.mode.advancedUnavailable') : undefined}
+              >
+                {t(lang, 'settings.mode.advanced')}
+              </button>
+            </div>
+            {modeChanged && (
+              <p className="text-xs mt-2 text-green-400">{t(lang, 'settings.mode.changed')}</p>
+            )}
+            {advancedLocked && (
+              <p className="text-xs mt-2" style={{ color: '#ef4444' }}>{t(lang, 'settings.mode.advancedUnavailable')}</p>
+            )}
           </div>
 
           {/* ── Auto-start services ── */}

@@ -93,6 +93,7 @@ const DEFAULT_SETTINGS = {
   savedUsername: '',
   savedPassword: '',
   rememberMe: false,
+  appMode: '', // '' = first-run not chosen; 'basic' | 'advanced'
 }
 
 function sanitizeSettings(input) {
@@ -105,6 +106,17 @@ function sanitizeSettings(input) {
   if ('setupComplete' in input) safe.setupComplete = input.setupComplete
   if (input.autoStart && typeof input.autoStart === 'object') safe.autoStart = input.autoStart
   return safe
+}
+
+function isBasicMode() {
+  try { return readSettings().appMode === 'basic' } catch { return false }
+}
+
+function isModeChosen() {
+  try {
+    const m = readSettings().appMode
+    return m === 'basic' || m === 'advanced'
+  } catch { return false }
 }
 
 function getDefaultPaths() {
@@ -402,6 +414,14 @@ function tpsCommandsForEgg(eggId) {
 }
 
 async function sendTpsProbe(serverId) {
+  if (isBasicMode()) {
+    const server = getServerByUuid(serverId)
+    const cmds = tpsCommandsForEgg(server?.eggId)
+    for (const cmd of cmds) {
+      if (localSendCommand(serverId, cmd)) return
+    }
+    return
+  }
   const server = getServerByUuid(serverId)
   const cmds = tpsCommandsForEgg(server?.eggId)
   if (!cmds.length) return
@@ -434,6 +454,7 @@ function getSettings() {
 const WINGS_DATA_DIR = path.join(app.getPath('appData'), '.TerverPanel', 'wings', 'servers')
 
 function ensureWingsDataToUser() {
+  if (isBasicMode()) return true
   try {
     const u = os.userInfo()
     const wingsRoot = path.join(path.dirname(WINGS_DATA_DIR))
@@ -450,9 +471,10 @@ function ensureWingsServersDir() {
     fs.accessSync(WINGS_DATA_DIR, fs.constants.W_OK)
     return true
   } catch {
+    if (isBasicMode()) return false
     try {
       const u = os.userInfo()
-      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${WINGS_DATA_DIR}'`)
+      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} '${WINGS_DATA_DIR}'`)
       if (!r.ok) return false
       fs.accessSync(WINGS_DATA_DIR, fs.constants.W_OK)
       ensureWingsDataToUser()
@@ -470,15 +492,25 @@ function ensureServerDir(serverId) {
     fs.accessSync(dir, fs.constants.W_OK)
     return dir
   } catch {
+    if (isBasicMode()) return null
     try {
       if (!ensureWingsServersDir()) return null
       const u = os.userInfo()
-      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${dir}' && chown -R ${u.uid}:${u.gid} '${dir}'`)
+      const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} '${dir}' && chown -R ${u.uid}:${u.gid} '${dir}'`)
       if (!r.ok) return null
       fs.accessSync(dir, fs.constants.W_OK)
       return dir
     } catch {
-      return null
+      try {
+        if (!ensureWingsServersDir()) return null
+        const u = os.userInfo()
+        const r = sudoExec(`install -d -o ${u.uid} -g ${u.gid} -m 755 '${dir}' && chown -R ${u.uid}:${u.gid} '${dir}'`)
+        if (!r.ok) return null
+        fs.accessSync(dir, fs.constants.W_OK)
+        return dir
+      } catch {
+        return null
+      }
     }
   }
 }
@@ -658,6 +690,11 @@ ipcMain.handle('app:openExternal', (e, url) => {
   if (!getTrustedWindow(e)) return null
   shell.openExternal(url)
   return true
+})
+
+ipcMain.handle('app:platform', (e) => {
+  if (!getTrustedWindow(e)) return null
+  return process.platform
 })
 
 ipcMain.handle('settings:get', () => {
@@ -929,6 +966,7 @@ function resolveDockerImage(server) {
 }
 
 function ensureJava(serverId) {
+  if (isBasicMode()) return null
   try {
     const server = getServerByUuid(serverId)
     if (!server) return null
@@ -944,6 +982,374 @@ function ensureJava(serverId) {
     updateServerConfig(serverId, { dockerImage: next })
     return { from: resolved, to: next, need }
   } catch { return null }
+}
+
+// ─── Basic mode: local process runner + managed Java ────────────────
+const _localProcs = new Map() // serverId -> { proc, stopping }
+const _basicJavaCache = new Map() // need -> javaBin path
+const BASIC_JAVA_DIR = path.join(APP_DATA_DIR, 'java')
+
+function findJavaBin(root) {
+  try {
+    const stack = [root]
+    while (stack.length) {
+      const d = stack.pop()
+      let entries
+      try { entries = fs.readdirSync(d, { withFileTypes: true }) } catch { continue }
+      for (const e of entries) {
+        const p = path.join(d, e.name)
+        if (e.isDirectory()) {
+          if (e.name === 'bin') {
+            const j = process.platform === 'win32' ? path.join(p, 'java.exe') : path.join(p, 'java')
+            if (fs.existsSync(j)) return j
+          } else if (!e.name.startsWith('.') && e.name !== 'bin') {
+            stack.push(p)
+          }
+        }
+      }
+    }
+  } catch {}
+  return null
+}
+
+async function ensureBasicJava(need, onProgress) {
+  const ver = Number(need) > 0 ? Number(need) : 21
+  const cached = _basicJavaCache.get(ver)
+  if (cached && fs.existsSync(cached)) return cached
+
+  const dir = path.join(BASIC_JAVA_DIR, `jdk-${ver}`)
+  const existing = findJavaBin(dir)
+  if (existing) {
+    _basicJavaCache.set(ver, existing)
+    return existing
+  }
+
+  const osName = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux'
+  const arch = process.arch === 'arm64' ? 'aarch64' : 'x64'
+  const isZip = osName === 'windows'
+  const url = `https://api.adoptium.net/v3/binary/latest/${ver}/ga/${osName}/${arch}/jre/hotspot/normal/eclipse`
+  const archive = path.join(BASIC_JAVA_DIR, `jdk-${ver}.${isZip ? 'zip' : 'tar.gz'}`)
+
+  try { await fs.promises.mkdir(BASIC_JAVA_DIR, { recursive: true }) } catch {}
+  try { await fs.promises.mkdir(dir, { recursive: true }) } catch {}
+
+  if (onProgress) onProgress(`Downloading Java ${ver} (${osName}/${arch})...`)
+  await downloadFile(url, archive, (downloaded, total) => {
+    if (onProgress && total > 0) {
+      const pct = Math.round((downloaded / total) * 100)
+      if (pct % 10 === 0) onProgress(`Downloading Java ${ver}... ${pct}%`)
+    }
+  })
+
+  if (onProgress) onProgress(`Extracting Java ${ver}...`)
+  if (isZip) {
+    const ps = `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${dir}' -Force`
+    await runProc('powershell.exe', ['-NoProfile', '-Command', ps], { timeout: 180000 })
+  } else {
+    await runProc('tar', ['-xzf', archive, '-C', dir], { timeout: 120000 })
+  }
+  try { await fs.promises.unlink(archive) } catch {}
+
+  const bin = findJavaBin(dir)
+  if (!bin) throw new Error(`Java ${ver} extract failed: binary not found in ${dir}`)
+  _basicJavaCache.set(ver, bin)
+  if (onProgress) onProgress(`Java ${ver} ready: ${bin}`)
+  return bin
+}
+
+function basicJavaNeed(server) {
+  const ver = (server.config && (server.config.MINECRAFT_VERSION || server.config.MC_VERSION || server.config.DL_VERSION || server.config.VANILLA_VERSION)) || server.version || ''
+  return requiredJavaForVersion(ver) || 21
+}
+
+function emitBasicStatus(serverId, state) {
+  updateServerConfig(serverId, {
+    status: state === 'running' ? 'running'
+      : state === 'starting' ? 'starting'
+      : state === 'stopping' ? 'stopping'
+      : 'stopped',
+  })
+  emitWsToRenderer(serverId, 'status', { state })
+}
+
+function localServerState(serverId) {
+  const e = _localProcs.get(serverId)
+  if (!e || !e.proc || e.proc.killed || e.proc.exitCode !== null) return 'offline'
+  if (e.stopping) return 'stopping'
+  const server = getServerByUuid(serverId)
+  if (server?.status === 'starting') return 'starting'
+  if (server?.status === 'running') return 'running'
+  return 'running'
+}
+
+async function startLocalServer(serverId) {
+  if (_localProcs.has(serverId)) return { ok: true, already: true }
+  const server = getServerByUuid(serverId)
+  if (!server) return { ok: false, error: 'Server not found' }
+
+  const serverDir = ensureServerDir(serverId)
+  if (!serverDir) return { ok: false, error: 'Cannot create server directory (no permission)' }
+
+  ensureEula(serverId)
+
+  const eggConfig = server.config || {}
+  const jarFile = eggConfig.SERVER_JARFILE || 'server.jar'
+  const jarPath = path.join(serverDir, jarFile)
+  if (!fs.existsSync(jarPath)) {
+    const anyJar = fs.readdirSync(serverDir).find(f => f.endsWith('.jar'))
+    if (!anyJar) return { ok: false, error: `Missing ${jarFile}. Install the server first.` }
+  }
+  const useJar = fs.existsSync(jarPath) ? jarFile : fs.readdirSync(serverDir).find(f => f.endsWith('.jar'))
+
+  updateServerConfig(serverId, { status: 'starting' })
+  appendServerHistory(serverId, 'start')
+  beginLogSession(serverId)
+  sendServerLog(serverId, '[Daemon] Starting server (basic mode, no Docker)...')
+
+  const need = basicJavaNeed(server)
+  let javaBin
+  try {
+    javaBin = await ensureBasicJava(need, (msg) => sendServerLog(serverId, `[Java] ${msg}`))
+  } catch (err) {
+    updateServerConfig(serverId, { status: 'stopped', startError: err.message })
+    sendServerLog(serverId, `[Daemon] Java download failed: ${err.message}`)
+    return { ok: false, error: err.message }
+  }
+
+  const memMb = Number(server.memory) > 0 ? Number(server.memory) : 1024
+  const args = [
+    `-Xms${Math.min(128, memMb)}M`,
+    `-Xmx${memMb}M`,
+    '-XX:MaxRAMPercentage=95.0',
+    '-Dterminal.jline=false',
+    '-Dterminal.ansi=true',
+    '-jar', useJar, 'nogui',
+  ]
+
+  sendServerLog(serverId, `[Daemon] ${javaBin} ${args.join(' ')}`)
+  emitBasicStatus(serverId, 'starting')
+  emitWsToRenderer(serverId, 'console output', { lines: '[Daemon] Starting server...' })
+
+  let proc
+  try {
+    proc = spawn(javaBin, args, {
+      cwd: serverDir,
+      env: { ...process.env, TZ: process.env.TZ || 'UTC' },
+      windowsHide: true,
+    })
+  } catch (err) {
+    updateServerConfig(serverId, { status: 'stopped', startError: err.message })
+    sendServerLog(serverId, `[Daemon] Spawn failed: ${err.message}`)
+    return { ok: false, error: err.message }
+  }
+
+  const entry = { proc, stopping: false }
+  _localProcs.set(serverId, entry)
+
+  let bufOut = ''
+  let bufErr = ''
+  const handleChunk = (chunk, isErr) => {
+    const raw = (isErr ? (bufErr += chunk.toString()) : (bufOut += chunk.toString()))
+    const parts = raw.split(/\r?\n/)
+    const partial = parts.pop()
+    if (isErr) bufErr = partial; else bufOut = partial
+    for (const line of parts) {
+      if (!line) continue
+      sendServerLog(serverId, line)
+      emitWsToRenderer(serverId, 'console output', { lines: line })
+      if (/Done \(|For help, type/.test(line) && localServerState(serverId) !== 'offline') {
+        emitBasicStatus(serverId, 'running')
+        startTpsPoller(serverId)
+      }
+    }
+  }
+  if (proc.stdout) proc.stdout.on('data', (d) => handleChunk(d, false))
+  if (proc.stderr) proc.stderr.on('data', (d) => handleChunk(d, true))
+
+  proc.on('error', (err) => {
+    _localProcs.delete(serverId)
+    stopTpsPoller(serverId)
+    clearServerTps(serverId)
+    emitBasicStatus(serverId, 'offline')
+    updateServerConfig(serverId, { status: 'stopped', startError: err.message })
+    sendServerLog(serverId, `[Daemon] Process error: ${err.message}`)
+    emitWsToRenderer(serverId, 'close', {})
+  })
+
+  proc.on('close', () => {
+    if (_localProcs.get(serverId) === entry) _localProcs.delete(serverId)
+    stopTpsPoller(serverId)
+    clearServerTps(serverId)
+    emitBasicStatus(serverId, 'offline')
+    sendServerLog(serverId, '[Daemon] Server process exited')
+    emitWsToRenderer(serverId, 'close', {})
+  })
+
+  // status poller marks running when Done seen; also force running after short grace if still alive
+  setTimeout(() => {
+    if (_localProcs.get(serverId) === entry && !entry.stopping && proc.exitCode === null) {
+      const s = getServerByUuid(serverId)
+      if (s?.status === 'starting') {
+        emitBasicStatus(serverId, 'running')
+        startTpsPoller(serverId)
+      }
+    }
+  }, 8000)
+
+  return { ok: true }
+}
+
+async function stopLocalServer(serverId, hard = false) {
+  const entry = _localProcs.get(serverId)
+  if (!entry || !entry.proc || entry.proc.exitCode !== null) {
+    emitBasicStatus(serverId, 'offline')
+    return { ok: true, already: true }
+  }
+  entry.stopping = true
+  emitBasicStatus(serverId, 'stopping')
+  stopTpsPoller(serverId)
+  clearServerTps(serverId)
+  sendServerLog(serverId, hard ? '[Daemon] Killed server' : '[Daemon] Stopping server (send stop)...')
+  emitWsToRenderer(serverId, 'console output', { lines: '[Daemon] Stopping...' })
+
+  if (hard) {
+    try { entry.proc.kill('SIGKILL') } catch {}
+    return { ok: true }
+  }
+
+  try {
+    if (entry.proc.stdin && !entry.proc.stdin.destroyed) {
+      entry.proc.stdin.write('stop\n')
+    }
+  } catch {}
+
+  await new Promise((resolve) => {
+    let done = false
+    const finish = () => { if (!done) { done = true; resolve() } }
+    entry.proc.once('close', finish)
+    setTimeout(() => {
+      if (!done && entry.proc.exitCode === null) {
+        try { entry.proc.kill('SIGKILL') } catch {}
+      }
+      finish()
+    }, 20000)
+  })
+  return { ok: true }
+}
+
+function localSendCommand(serverId, command) {
+  const entry = _localProcs.get(serverId)
+  if (!entry || !entry.proc || entry.proc.exitCode !== null) return false
+  try {
+    if (!entry.proc.stdin || entry.proc.stdin.destroyed) return false
+    entry.proc.stdin.write(String(command) + '\n')
+    return true
+  } catch { return false }
+}
+
+async function findBasicShell() {
+  if (process.platform !== 'win32') {
+    const candidates = ['/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh']
+    for (const c of candidates) if (fs.existsSync(c)) return c
+    return 'bash'
+  }
+  const wins = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Git', 'bin', 'bash.exe'),
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+  ]
+  for (const w of wins) if (fs.existsSync(w)) return w
+  try {
+    const r = runProc('where', ['bash'], { timeout: 4000 })
+    if (r.status === 0 && r.stdout) {
+      const first = r.stdout.trim().split(/\r?\n/)[0]?.trim()
+      if (first && fs.existsSync(first)) return first
+    }
+  } catch {}
+  return null
+}
+
+function rewriteBasicInstallScript(script, serverDir) {
+  const posixDir = serverDir.replace(/\\/g, '/')
+  let s = String(script || '')
+  s = s.replace(/\/mnt\/server/g, posixDir)
+  s = s.replace(/\/home\/container/g, posixDir)
+  // apt no-op shim when curl+jq already present (no root in basic mode)
+  const shim = [
+    'apt() { if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then echo "[basic] skip apt (curl/jq present): $*"; return 0; fi; echo "[basic] apt not available (need root or preinstall curl+jq): $*"; return 1; }',
+    'apt-get() { apt "$@"; }',
+    'export DEBIAN_FRONTEND=noninteractive',
+    '',
+  ].join('\n')
+  s = s.replace(/^#!.*\r?\n/, '')
+  return '#!/usr/bin/env bash\n' + shim + s
+}
+
+function buildEggEnv(server, eggData) {
+  const eggConfig = server.config || {}
+  const env = {}
+  const eggVariables = (eggData && eggData.variables) || []
+  for (const v of eggVariables) {
+    const envName = v.env_variable
+    let value = ''
+    if (envName === 'SERVER_JARFILE') value = eggConfig.SERVER_JARFILE || 'server.jar'
+    else if (envName === 'MC_VERSION' || envName === 'MINECRAFT_VERSION' || envName === 'VANILLA_VERSION' || envName === 'DL_VERSION') {
+      value = eggConfig[envName] || server.version || v.default_value || 'latest'
+    } else if (envName === 'BUILD_NUMBER') value = eggConfig[envName] || v.default_value || 'latest'
+    else if (envName === 'FORGE_VERSION') value = eggConfig[envName] || ''
+    else if (envName === 'FABRIC_VERSION' || envName === 'LOADER_VERSION') value = eggConfig[envName] || v.default_value || 'latest'
+    else if (envName === 'BUILD_TYPE') value = eggConfig[envName] || v.default_value || 'recommended'
+    else if (envName === 'DL_PATH') value = eggConfig[envName] || ''
+    else value = eggConfig[envName] || v.default_value || ''
+    env[envName] = value
+  }
+  return env
+}
+
+function runBasicInstallScript(serverId, serverDir, eggData, env) {
+  return new Promise((resolve, reject) => {
+    findBasicShell().then((shell) => {
+      if (!shell) {
+        reject(new Error('No bash found. On Windows install Git Bash (https://git-scm.com/download/win).'))
+        return
+      }
+      const script = rewriteBasicInstallScript(eggData.scripts.installation.script, serverDir)
+      const scriptPath = path.join(serverDir, '_install.sh')
+      fs.writeFile(scriptPath, script, { mode: 0o755 }, (werr) => {
+        if (werr) { reject(werr); return }
+        let stdoutBuf = ''
+        let proc
+        try {
+          proc = spawn(shell, [scriptPath], {
+            cwd: serverDir,
+            env: { ...process.env, ...env },
+            windowsHide: true,
+          })
+        } catch (err) { reject(err); return }
+
+        const emit = (text) => {
+          for (const line of text.split(/\r?\n/)) {
+            if (line) {
+              sendServerLog(serverId, `[Install] ${line}`)
+              emitWsToRenderer(serverId, 'install output', { lines: `[Install] ${line}` })
+            }
+          }
+        }
+        if (proc.stdout) proc.stdout.on('data', (d) => { stdoutBuf += d.toString(); emit(d.toString()) })
+        if (proc.stderr) proc.stderr.on('data', (d) => { emit(d.toString()) })
+        proc.on('error', (err) => {
+          try { fs.unlinkSync(scriptPath) } catch {}
+          reject(err)
+        })
+        proc.on('close', (code) => {
+          try { fs.unlinkSync(scriptPath) } catch {}
+          if (code === 0) resolve()
+          else reject(new Error(`Install script exited with code ${code}`))
+        })
+      })
+    }).catch(reject)
+  })
 }
 
 function runProc(cmd, args, opts = {}) {
@@ -990,31 +1396,39 @@ ipcMain.handle('server:addConfig', async (e, serverConfig) => {
   addServerConfig(server)
   ensureEula(server.id)
   ensureJava(server.id)
-  syncServerToWings(server.id).catch(() => {})
+  if (!isBasicMode()) syncServerToWings(server.id).catch(() => {})
   return { ok: true, server }
 })
 
-ipcMain.handle('server:removeConfig', (e, id) => {
+ipcMain.handle('server:removeConfig', async (e, id) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const basic = isBasicMode()
+  if (_localProcs.has(id)) {
+    try { await stopLocalServer(id, true) } catch {}
+  }
   removeServerConfig(id)
   const serverDir = path.join(WINGS_DATA_DIR, id)
   if (fs.existsSync(serverDir)) {
     try {
-      fs.rmSync(serverDir, { recursive: true, force: true })
+      await fs.promises.rm(serverDir, { recursive: true, force: true })
     } catch {
-      try {
-        const dockerBin = path.join((readSettings().paths?.docker || getDefaultPaths().docker).replace(/^~/, os.homedir()), 'bin', 'docker')
-        spawnSync(dockerBin, ['run', '--rm', '-v', `${path.dirname(serverDir)}:/mnt/servers`, 'alpine', 'rm', '-rf', `/mnt/servers/${id}`], { timeout: 15000 })
-      } catch {}
-      if (fs.existsSync(serverDir)) {
-        spawnSync('rm', ['-rf', serverDir], { timeout: 15000 })
-      }
-      if (fs.existsSync(serverDir)) {
-        sudoExec(`rm -rf "${serverDir}"`)
+      if (!basic) {
+        try {
+          const dockerBin = path.join((readSettings().paths?.docker || getDefaultPaths().docker).replace(/^~/, os.homedir()), 'bin', 'docker')
+          await runProc(dockerBin, ['run', '--rm', '-v', `${path.dirname(serverDir)}:/mnt/servers`, 'alpine', 'rm', '-rf', `/mnt/servers/${id}`], { timeout: 15000 })
+        } catch {}
+        if (fs.existsSync(serverDir)) {
+          await runProc('rm', ['-rf', serverDir], { timeout: 15000 })
+        }
+        if (fs.existsSync(serverDir)) {
+          sudoExec(`rm -rf "${serverDir}"`)
+        }
       }
     }
   }
-  try { wingsApiCall('DELETE', `/api/servers/${id}`).catch(() => {}) } catch {}
+  if (!basic) {
+    try { wingsApiCall('DELETE', `/api/servers/${id}`).catch(() => {}) } catch {}
+  }
   return { ok: true }
 })
 
@@ -1158,6 +1572,7 @@ function downloadFile(url, destPath, onProgress) {
 }
 
 function ensureWingsWs(serverId) {
+  if (isBasicMode()) return
   const entry = _wingsWs.get(serverId)
   if (entry && entry.connected && entry.authenticated) return
   try { connectWingsWs(serverId, {}) } catch {}
@@ -1203,10 +1618,11 @@ function scheduleStopCleanup(serverId, delayMs = 8000) {
   }, 700)
 }
 
-ipcMain.handle('server:install', async (e, serverId) => {
+async function doInstallServer(e, serverId) {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   const server = getServerByUuid(serverId)
   if (!server) return { ok: false, error: 'Server not found' }
+  const basic = isBasicMode()
 
   updateServerConfig(server.id, { status: 'installing' })
   sendServerProgress(server.id, 0, 'Preparing server directory...')
@@ -1216,8 +1632,10 @@ ipcMain.handle('server:install', async (e, serverId) => {
   emitLogReset(server.id)
   stopLogStream(server.id)
   sendServerLog(server.id, `[Install] Starting installation for ${server.name}...`)
-  startLogStream(server.id, { boot: true, baseline: true })
-  ensureWingsWs(server.id)
+  if (!basic) {
+    startLogStream(server.id, { boot: true, baseline: true })
+    ensureWingsWs(server.id)
+  }
 
   try {
     const serverDir = ensureServerDir(server.id)
@@ -1233,20 +1651,37 @@ ipcMain.handle('server:install', async (e, serverId) => {
     const dockerBin = path.join((readSettings().paths?.docker || getDefaultPaths().docker).replace(/^~/, os.homedir()), 'bin', 'docker')
     const uid = os.userInfo().uid
     const gid = os.userInfo().gid
-    try {
-      const inspectAlpine = await runProc(dockerBin, ['inspect', 'alpine'], { timeout: 5000 })
-      if (inspectAlpine.status !== 0) {
-        sendServerLog(server.id, `[Install] Pulling alpine image...`)
-        await runProc(dockerBin, ['pull', 'alpine'], { timeout: 60000 })
+    if (!basic) {
+      try {
+        const inspectAlpine = await runProc(dockerBin, ['inspect', 'alpine'], { timeout: 5000 })
+        if (inspectAlpine.status !== 0) {
+          sendServerLog(server.id, `[Install] Pulling alpine image...`)
+          await runProc(dockerBin, ['pull', 'alpine'], { timeout: 60000 })
+        }
+        sendServerLog(server.id, `[Install] Cleaning server directory...`)
+        await runProc(dockerBin, ['run', '--rm', '-v', `${serverDir}:/mnt/server`, 'alpine', 'sh', '-c', 'rm -rf /mnt/server/* /mnt/server/.[!.]* 2>/dev/null; chown -R ' + uid + ':' + gid + ' /mnt/server'], { timeout: 30000 })
+        sendServerLog(server.id, `[Install] Directory cleaned and ownership fixed`)
+        ensureEula(server.id)
+        const javaFixed2 = ensureJava(server.id)
+        if (javaFixed2) sendServerLog(server.id, `[Install] Using Docker image ${javaFixed2.to} (needs Java ${javaFixed2.need})`)
+      } catch (err) {
+        sendServerLog(server.id, `[Install] WARNING: Docker cleanup failed: ${err.message}`)
       }
-      sendServerLog(server.id, `[Install] Cleaning server directory...`)
-      await runProc(dockerBin, ['run', '--rm', '-v', `${serverDir}:/mnt/server`, 'alpine', 'sh', '-c', 'rm -rf /mnt/server/* /mnt/server/.[!.]* 2>/dev/null; chown -R ' + uid + ':' + gid + ' /mnt/server'], { timeout: 30000 })
-      sendServerLog(server.id, `[Install] Directory cleaned and ownership fixed`)
+    } else {
+      // Basic: async local clean — no Docker, no root, must not freeze UI
+      sendServerLog(server.id, '[Install] Cleaning server directory (basic, no Docker)...')
+      try {
+        const entries = await fs.promises.readdir(serverDir)
+        await Promise.all(entries.map(async (name) => {
+          if (name === 'eula.txt') return
+          const full = path.join(serverDir, name)
+          await fs.promises.rm(full, { recursive: true, force: true })
+        }))
+        sendServerLog(server.id, '[Install] Directory cleaned')
+      } catch (err) {
+        sendServerLog(server.id, `[Install] WARNING: clean failed: ${err.message}`)
+      }
       ensureEula(server.id)
-      const javaFixed2 = ensureJava(server.id)
-      if (javaFixed2) sendServerLog(server.id, `[Install] Using Docker image ${javaFixed2.to} (needs Java ${javaFixed2.need})`)
-    } catch (err) {
-      sendServerLog(server.id, `[Install] WARNING: Docker cleanup failed: ${err.message}`)
     }
 
     const eggName = (server.eggId || 'paper').split('/').pop()
@@ -1268,9 +1703,8 @@ ipcMain.handle('server:install', async (e, serverId) => {
       const entrypoint = install.entrypoint || 'ash'
       const installScript = install.script
 
-      sendServerProgress(server.id, 5, `Running install script in Docker...`)
+      sendServerProgress(server.id, 5, basic ? 'Running install script (basic)...' : 'Running install script in Docker...')
       sendServerLog(server.id, `[Install] Egg: ${eggData.name || eggName}`)
-      sendServerLog(server.id, `[Install] Installer container: ${installerContainer}`)
 
       const envVars = []
       const eggVariables = eggData.variables || []
@@ -1289,6 +1723,22 @@ ipcMain.handle('server:install', async (e, serverId) => {
         else value = eggConfig[envName] || v.default_value || ''
         envVars.push('-e', `${envName}=${value}`)
       }
+
+      if (basic) {
+        sendServerLog(server.id, `[Install] Installer: local shell (rewritten /mnt/server → ${serverDir})`)
+        sendServerProgress(server.id, 10, 'Running egg install script...')
+        const envObj = {}
+        for (let i = 0; i < envVars.length; i += 2) {
+          if (envVars[i] === '-e') {
+            const eq = envVars[i + 1].indexOf('=')
+            envObj[envVars[i + 1].slice(0, eq)] = envVars[i + 1].slice(eq + 1)
+          }
+        }
+        await runBasicInstallScript(server.id, serverDir, eggData, envObj)
+        sendServerProgress(server.id, 85, 'Install script completed')
+        sendServerLog(server.id, '[Install] Install script completed successfully')
+      } else {
+      sendServerLog(server.id, `[Install] Installer container: ${installerContainer}`)
 
       const dockerCheck = await runProc(dockerBin, ['inspect', installerContainer], { timeout: 10000 })
       if (dockerCheck.status !== 0) {
@@ -1350,6 +1800,7 @@ ipcMain.handle('server:install', async (e, serverId) => {
           reject(new Error(`Failed to run Docker: ${err.message}`))
         })
       })
+      }
     } else {
       sendServerLog(server.id, '[Install] No install script in egg, using direct download...')
       if (server.jarUrl) {
@@ -1427,8 +1878,10 @@ ipcMain.handle('server:install', async (e, serverId) => {
     sendServerProgress(server.id, 100, 'Installation complete!')
     sendServerLog(server.id, '[Install] Installation complete! Server is ready to start.')
     appendServerHistory(server.id, 'install')
-    sendServerLog(server.id, '[Install] Syncing server to Wings daemon...')
-    await syncServerToWings(server.id)
+    if (!basic) {
+      sendServerLog(server.id, '[Install] Syncing server to Wings daemon...')
+      await syncServerToWings(server.id)
+    }
     const freshServer = getServerByUuid(server.id)
     return { ok: true, server: freshServer }
   } catch (err) {
@@ -1437,6 +1890,10 @@ ipcMain.handle('server:install', async (e, serverId) => {
     sendServerLog(server.id, `[Install] ERROR: ${err.message}`)
     return { ok: false, error: err.message }
   }
+}
+
+ipcMain.handle('server:install', async (e, serverId) => {
+  return doInstallServer(e, serverId)
 })
 
 // Stream Wings console logs to renderer while a server is active
@@ -1644,25 +2101,49 @@ function sendWingsWs(serverId, event, args = []) {
 
 ipcMain.handle('wings:ws-connect', async (e, serverId) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    emitWsToRenderer(serverId, 'auth success', { permissions: ['websocket.connect', 'control.read-console', 'control.console', 'control.start', 'control.stop', 'control.restart'] })
+    const st = localServerState(serverId)
+    emitWsToRenderer(serverId, 'status', { state: st === 'offline' ? 'offline' : st })
+    return { ok: true, basic: true }
+  }
   return connectWingsWs(serverId, {})
 })
 ipcMain.handle('wings:ws-disconnect', async (e, serverId) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) return { ok: true }
   closeWingsWs(serverId, { reconnect: false })
   return { ok: true }
 })
 ipcMain.handle('wings:ws-send', async (e, serverId, event, args) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    if (event === 'send command') {
+      const cmd = Array.isArray(args) ? args[0] : args
+      const ok = localSendCommand(serverId, cmd)
+      return { ok }
+    }
+    if (event === 'send status') {
+      const st = localServerState(serverId)
+      emitWsToRenderer(serverId, 'status', { state: st === 'offline' ? 'offline' : st })
+      return { ok: true }
+    }
+    return { ok: true }
+  }
   const ok = sendWingsWs(serverId, event, args || [])
   return { ok }
 })
 ipcMain.handle('wings:ws-status', async (e, serverId) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    return { ok: true, connected: true, authenticated: true, basic: true }
+  }
   const entry = _wingsWs.get(serverId)
   return { ok: true, connected: !!entry?.connected, authenticated: !!entry?.authenticated }
 })
 
 function startLogStream(serverId, opts = {}) {
+  if (isBasicMode()) return // local runner pipes stdout directly
   stopLogStream(serverId)
   const server = getServerByUuid(serverId)
   const hostHint = getContainerHostHint(server)
@@ -1745,6 +2226,10 @@ ipcMain.handle('server:start', async (e, serverId) => {
   const server = getServerByUuid(serverId)
   if (!server) return { ok: false, error: 'Server not found' }
 
+  if (isBasicMode()) {
+    return startLocalServer(serverId)
+  }
+
   const eulaFixed = ensureEula(server.id)
   const javaFixed = ensureJava(server.id)
   updateServerConfig(server.id, { status: 'starting' })
@@ -1756,6 +2241,9 @@ ipcMain.handle('server:start', async (e, serverId) => {
   startLogStream(server.id, { boot: true, baseline: true })
   ensureWingsWs(server.id)
   try {
+    if (isBasicMode()) {
+      return await startLocalServer(server.id)
+    }
     const data = await wingsApiCall('POST', `/api/servers/${server.id}/power`, { action: 'start', wait_seconds: 0 })
     return { ok: true, data }
   } catch (err) {
@@ -1786,6 +2274,10 @@ ipcMain.handle('server:stop', async (e, serverId) => {
   const server = getServerByUuid(serverId)
   if (!server) return { ok: false, error: 'Server not found' }
 
+  if (isBasicMode()) {
+    return stopLocalServer(serverId, false)
+  }
+
   updateServerConfig(server.id, { status: 'stopping' })
   appendServerHistory(server.id, 'stop')
   stopTpsPoller(server.id)
@@ -1808,6 +2300,11 @@ ipcMain.handle('server:kill', async (e, serverId) => {
   const server = getServerByUuid(serverId)
   if (!server) return { ok: false, error: 'Server not found' }
 
+  if (isBasicMode()) {
+    appendServerHistory(server.id, 'kill')
+    return stopLocalServer(serverId, true)
+  }
+
   try {
     appendServerHistory(server.id, 'kill')
     stopTpsPoller(server.id)
@@ -1828,6 +2325,28 @@ ipcMain.handle('server:status', async (e, serverId) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
   const server = getServerByUuid(serverId)
   if (!server) return { ok: false, error: 'Server not found' }
+
+  if (isBasicMode()) {
+    const state = localServerState(serverId)
+    const isRunning = state === 'running'
+    const nextStatus = isRunning ? 'running' : state === 'starting' ? 'starting' : state === 'stopping' ? 'stopping' : (server.status === 'installing' ? 'installing' : 'stopped')
+    if (isRunning) startTpsPoller(serverId)
+    else if (state === 'offline' && server.status === 'running') {
+      stopTpsPoller(serverId)
+      clearServerTps(serverId)
+    }
+    updateServerConfig(serverId, { status: nextStatus })
+    const live = _serverTps.get(serverId)
+    const tps = live?.tps ?? (isRunning ? (server.lastTps ?? null) : null)
+    const memory = isRunning ? (Number(server.memory) > 0 ? Number(server.memory) * 1048576 : null) : null
+    return {
+      ok: true,
+      status: nextStatus,
+      state,
+      resources: isRunning ? { cpu_absolute: 0, memory_bytes: memory, memory: memory, disk_bytes: null, uptime: null } : {},
+      tps,
+    }
+  }
 
   try {
     const data = await wingsApiCall('GET', `/api/servers/${server.id}`)
@@ -4856,12 +5375,15 @@ app.whenReady().then(() => {
 
   createMainWindow()
   createTray()
-  startWingsApiServer()
+  if (!isBasicMode()) {
+    startWingsApiServer()
+  }
   startScheduler()
 
   // Auto-start services based on settings
   setTimeout(() => {
     try {
+      if (isBasicMode()) return
       const settings = readSettings()
       const autoStart = settings.autoStart || {}
 
@@ -4877,15 +5399,13 @@ app.whenReady().then(() => {
       if (autoStart.database) {
         sudoExec('systemctl start postgresql 2>/dev/null || true')
       }
-      if (autoStart.database) {
-        sudoExec('systemctl start postgresql 2>/dev/null || true')
-      }
     } catch {}
   }, 2000)
 
   // Sync all servers to Wings daemon after services are up
   setTimeout(async () => {
     try {
+      if (isBasicMode()) return
       const servers = listServerConfigs()
       console.log(`[App] Syncing ${servers.length} servers to Wings...`)
       for (const s of servers) {
@@ -4900,6 +5420,16 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  for (const [sid, rec] of _localProcs) {
+    try {
+      if (rec.proc && !rec.proc.killed) rec.proc.kill('SIGKILL')
+    } catch {}
+    if (rec.stoppingTimeout) clearTimeout(rec.stoppingTimeout)
+    if (rec.graceTimeout) clearTimeout(rec.graceTimeout)
+    try { updateServerConfig(sid, { status: 'stopped' }) } catch {}
+    emitWsToRenderer(sid, { event: 'status', status: 'offline' })
+  }
+  _localProcs.clear()
   if (cloudflaredProcess) { try { cloudflaredProcess.kill('SIGTERM') } catch {} cloudflaredProcess = null }
   for (const id of Array.from(_wingsWs.keys())) closeWingsWs(id, { reconnect: false })
   stopWingsApiServer()
@@ -4935,6 +5465,7 @@ async function wingsApiCall(method, endpoint, body) {
 }
 
 async function syncServerToWings(serverId) {
+  if (isBasicMode()) return true
   try {
     console.log(`[Wings] Syncing server ${serverId} to Wings daemon...`)
     const result = await wingsApiCall('POST', '/api/servers', {
@@ -4952,6 +5483,10 @@ async function syncServerToWings(serverId) {
 
 ipcMain.handle('wings:server:state', async (e, uuid) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    const st = localServerState(uuid)
+    return { ok: true, state: st === 'offline' ? 'offline' : st }
+  }
   try {
     const data = await wingsApiCall('GET', `/api/servers/${uuid}`)
     return { ok: true, state: data?.state || data?.configuration?.state || 'stopped' }
@@ -4960,6 +5495,23 @@ ipcMain.handle('wings:server:state', async (e, uuid) => {
 
 ipcMain.handle('wings:server:power', async (e, uuid, action) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    try {
+      if (action === 'start') return await startLocalServer(uuid)
+      if (action === 'stop') return await stopLocalServer(uuid, false)
+      if (action === 'kill') {
+        appendServerHistory(uuid, 'kill')
+        return await stopLocalServer(uuid, true)
+      }
+      if (action === 'restart') {
+        appendServerHistory(uuid, 'restart')
+        await stopLocalServer(uuid, false)
+        await new Promise(r => setTimeout(r, 800))
+        return await startLocalServer(uuid)
+      }
+      return { ok: false, error: 'Unknown action' }
+    } catch (err) { return { ok: false, error: err.message } }
+  }
   try {
     const eulaFixed = (action === 'start' || action === 'restart') ? ensureEula(uuid) : false
     const javaFixed = (action === 'start' || action === 'restart') ? ensureJava(uuid) : null
@@ -4999,6 +5551,10 @@ ipcMain.handle('wings:server:power', async (e, uuid, action) => {
 
 ipcMain.handle('wings:server:command', async (e, uuid, command) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    const ok = localSendCommand(uuid, command)
+    return ok ? { ok: true } : { ok: false, error: 'Server not running' }
+  }
   try {
     const data = await wingsApiCall('POST', `/api/servers/${uuid}/commands`, { commands: [command] })
     return { ok: true, data }
@@ -5007,6 +5563,10 @@ ipcMain.handle('wings:server:command', async (e, uuid, command) => {
 
 ipcMain.handle('wings:server:logs', async (e, uuid, lines) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    const logs = getServerLogs(uuid).map(x => x.message).join('\n')
+    return { ok: true, logs }
+  }
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5042,6 +5602,7 @@ ipcMain.handle('wings:server:logs', async (e, uuid, lines) => {
 
 ipcMain.handle('wings:server:files', async (e, uuid, dirPath) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5077,6 +5638,7 @@ ipcMain.handle('wings:server:files', async (e, uuid, dirPath) => {
       }
     }
   } catch {}
+  }
   const serverDir = path.join(WINGS_DATA_DIR, uuid)
   const targetDir = path.join(serverDir, dirPath || '/')
   try {
@@ -5101,6 +5663,7 @@ ipcMain.handle('wings:server:readFile', async (e, uuid, filePath) => {
       return { ok: false, is_dir: true, content: '', error: 'EISDIR: directory' }
     }
   } catch {}
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5140,6 +5703,7 @@ ipcMain.handle('wings:server:readFile', async (e, uuid, filePath) => {
       }
     }
   } catch {}
+  }
   try {
     const content = fs.readFileSync(fullPath, 'utf-8')
     return { ok: true, content }
@@ -5151,6 +5715,7 @@ ipcMain.handle('wings:server:readFile', async (e, uuid, filePath) => {
 
 ipcMain.handle('wings:server:writeFile', async (e, uuid, filePath, content) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5171,6 +5736,7 @@ ipcMain.handle('wings:server:writeFile', async (e, uuid, filePath, content) => {
     if (resp.status !== 404) return { ok: false, error: errText || `HTTP ${resp.status}` }
   } catch (err) {
     // fall through to local write
+  }
   }
   const fullPath = path.join(WINGS_DATA_DIR, uuid, filePath)
   try {
@@ -5195,6 +5761,7 @@ ipcMain.handle('wings:server:uploadFile', async (e, uuid, filePath, data) => {
   const rel = String(filePath || '').replace(/^\/+/, '')
   if (!rel || rel.includes('..')) return { ok: false, error: 'Invalid path' }
   const buf = ipcBuffer(data)
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5214,6 +5781,7 @@ ipcMain.handle('wings:server:uploadFile', async (e, uuid, filePath, data) => {
     const errText = await resp.text().catch(() => '')
     if (resp.status !== 404) return { ok: false, error: errText || `HTTP ${resp.status}` }
   } catch {}
+  }
   try {
     const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
     fs.mkdirSync(path.dirname(fullPath), { recursive: true })
@@ -5227,6 +5795,7 @@ ipcMain.handle('wings:server:moveFile', async (e, uuid, fromPath, toPath) => {
   const from = String(fromPath || '').replace(/^\/+/, '')
   const to = String(toPath || '').replace(/^\/+/, '')
   if (!from || !to || from.includes('..') || to.includes('..')) return { ok: false, error: 'Invalid path' }
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5245,6 +5814,7 @@ ipcMain.handle('wings:server:moveFile', async (e, uuid, fromPath, toPath) => {
     const errText = await resp.text().catch(() => '')
     if (resp.status !== 404 && resp.status !== 405) return { ok: false, error: errText || `HTTP ${resp.status}` }
   } catch {}
+  }
   try {
     const src = path.join(WINGS_DATA_DIR, uuid, from)
     const dest = path.join(WINGS_DATA_DIR, uuid, to)
@@ -5256,10 +5826,12 @@ ipcMain.handle('wings:server:moveFile', async (e, uuid, fromPath, toPath) => {
 
 ipcMain.handle('wings:server:deleteFile', async (e, uuid, filePath) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (!isBasicMode()) {
   try {
     const data = await wingsApiCall('DELETE', `/api/servers/${uuid}/files/delete?files[]=${encodeURIComponent(filePath)}`)
     return { ok: true, data }
   } catch {}
+  }
   const fullPath = path.join(WINGS_DATA_DIR, uuid, filePath)
   try {
     const stat = fs.statSync(fullPath)
@@ -5279,6 +5851,7 @@ ipcMain.handle('wings:server:createFile', async (e, uuid, dirPath, fileName) => 
   const name = String(fileName || '').trim()
   if (!name || name.includes('/') || name.includes('\\')) return { ok: false, error: 'Invalid name' }
   const rel = localJoinPath(dirPath || '/', name)
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5292,6 +5865,7 @@ ipcMain.handle('wings:server:createFile', async (e, uuid, dirPath, fileName) => 
     })
     if (resp.ok) return { ok: true, path: rel }
   } catch {}
+  }
   try {
     const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
     fs.mkdirSync(path.dirname(fullPath), { recursive: true })
@@ -5305,6 +5879,7 @@ ipcMain.handle('wings:server:createFolder', async (e, uuid, dirPath, folderName)
   const name = String(folderName || '').trim()
   if (!name || name.includes('/') || name.includes('\\')) return { ok: false, error: 'Invalid name' }
   const rel = localJoinPath(dirPath || '/', name)
+  if (!isBasicMode()) {
   try {
     const tokenData = getWingsLocalToken()
     const token = tokenData?.token || ''
@@ -5317,6 +5892,7 @@ ipcMain.handle('wings:server:createFolder', async (e, uuid, dirPath, folderName)
     })
     if (resp.ok) return { ok: true, path: rel }
   } catch {}
+  }
   try {
     const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
     fs.mkdirSync(fullPath, { recursive: true })
@@ -5326,6 +5902,7 @@ ipcMain.handle('wings:server:createFolder', async (e, uuid, dirPath, folderName)
 
 ipcMain.handle('wings:server:sync', async (e, uuid, config) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) return { ok: true }
   try {
     const data = await wingsApiCall('POST', `/api/servers/${uuid}/sync`, config)
     return { ok: true, data }
@@ -5334,6 +5911,13 @@ ipcMain.handle('wings:server:sync', async (e, uuid, config) => {
 
 ipcMain.handle('wings:server:reinstall', async (e, uuid) => {
   if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  if (isBasicMode()) {
+    try {
+      const server = getServerByUuid(uuid)
+      if (!server) return { ok: false, error: 'Server not found' }
+      return await doInstallServer(e, uuid)
+    } catch (err) { return { ok: false, error: err.message } }
+  }
   try {
     const data = await wingsApiCall('POST', `/api/servers/${uuid}/reinstall`)
     return { ok: true, data }
@@ -5348,8 +5932,10 @@ ipcMain.handle('wings:server:delete', async (e, uuid) => {
     if (fs.existsSync(serverDir)) {
       fs.rmSync(serverDir, { recursive: true, force: true })
     }
-    try { await wingsApiCall('DELETE', `/api/servers/${uuid}`) } catch {}
-    restartWings()
+    if (!isBasicMode()) {
+      try { await wingsApiCall('DELETE', `/api/servers/${uuid}`) } catch {}
+      restartWings()
+    }
     return { ok: true }
   } catch (err) { return { ok: false, error: err.message } }
 })
