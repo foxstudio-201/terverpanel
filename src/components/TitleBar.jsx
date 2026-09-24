@@ -77,21 +77,25 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, 
   const [serverNet, setServerNet] = useState({ rxSpeed: 0, txSpeed: 0 })
 
   useEffect(() => {
-    if (!isElectron || isBasic) return
+    if (!isElectron) return
     const interval = setInterval(async () => {
       try {
-        const [d, w, p, n, servers] = await Promise.all([
-          window.electronAPI.getDockerStatus(),
-          window.electronAPI.getWingsStatus(),
+        const [p, n, servers] = await Promise.all([
           window.electronAPI.getPing(),
           window.electronAPI.getNetworkStats(),
           window.electronAPI.listServers(),
         ])
-        if (d?.ok) setDocker(d)
-        if (w?.ok) setWings(w)
         if (p?.ok) setPing(p.ms)
         if (n?.ok) setNet({ rxSpeed: n.rxSpeed, txSpeed: n.txSpeed })
         if (Array.isArray(servers)) setServerCount(servers.length)
+        if (!isBasic) {
+          const [d, w] = await Promise.all([
+            window.electronAPI.getDockerStatus(),
+            window.electronAPI.getWingsStatus(),
+          ])
+          if (d?.ok) setDocker(d)
+          if (w?.ok) setWings(w)
+        }
       } catch {}
     }, 2000)
     return () => clearInterval(interval)
