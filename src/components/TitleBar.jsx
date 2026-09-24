@@ -55,8 +55,9 @@ function StatusDot({ color }) {
   )
 }
 
-export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, server }) {
+export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, server, appMode }) {
   const isDark = theme === 'dark'
+  const isBasic = appMode === 'basic'
   const textColor = isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'
   const textHover = isDark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.9)'
   const hoverBg = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'
@@ -76,7 +77,7 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, 
   const [serverNet, setServerNet] = useState({ rxSpeed: 0, txSpeed: 0 })
 
   useEffect(() => {
-    if (!isElectron) return
+    if (!isElectron || isBasic) return
     const interval = setInterval(async () => {
       try {
         const [d, w, p, n, servers] = await Promise.all([
@@ -94,7 +95,7 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, 
       } catch {}
     }, 2000)
     return () => clearInterval(interval)
-  }, [])
+  }, [isBasic])
 
   const serverId = server?.id || null
 
@@ -172,31 +173,35 @@ export default function TitleBar({ onCloseRequest, user, onLogout, lang, theme, 
       <div className="absolute left-1/2 -translate-x-1/2 no-drag flex items-center gap-2">
         {isElectron && (
           <>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
-              <StatusDot color={getDockerColor()} />
-              <DockerIcon color={getDockerColor()} />
-              <span className="text-[10px] font-medium" style={{ color: getDockerColor() }}>
-                {getDockerLabel()}
-              </span>
-              {docker.running && docker.containers > 0 && (
-                <span className="text-[9px] px-1 py-0.5 rounded" style={{ background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.1)', color: '#22c55e' }}>
-                  {docker.containers}
-                </span>
-              )}
-            </div>
+            {!isBasic && (
+              <>
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
+                  <StatusDot color={getDockerColor()} />
+                  <DockerIcon color={getDockerColor()} />
+                  <span className="text-[10px] font-medium" style={{ color: getDockerColor() }}>
+                    {getDockerLabel()}
+                  </span>
+                  {docker.running && docker.containers > 0 && (
+                    <span className="text-[9px] px-1 py-0.5 rounded" style={{ background: isDark ? 'rgba(34,197,94,0.15)' : 'rgba(34,197,94,0.1)', color: '#22c55e' }}>
+                      {docker.containers}
+                    </span>
+                  )}
+                </div>
 
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
-              <StatusDot color={getWingsColor()} />
-              <WingsIcon color={getWingsColor()} />
-              <span className="text-[10px] font-medium" style={{ color: getWingsColor() }}>
-                {getWingsLabel()}
-              </span>
-              {wings.installed && wings.version && (
-                <span className="text-[9px] px-1 py-0.5 rounded" style={{ background: isDark ? 'rgba(6,182,212,0.15)' : 'rgba(6,182,212,0.1)', color: '#06b6d4' }}>
-                  {wings.version}
-                </span>
-              )}
-            </div>
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
+                  <StatusDot color={getWingsColor()} />
+                  <WingsIcon color={getWingsColor()} />
+                  <span className="text-[10px] font-medium" style={{ color: getWingsColor() }}>
+                    {getWingsLabel()}
+                  </span>
+                  {wings.installed && wings.version && (
+                    <span className="text-[9px] px-1 py-0.5 rounded" style={{ background: isDark ? 'rgba(6,182,212,0.15)' : 'rgba(6,182,212,0.1)', color: '#06b6d4' }}>
+                      {wings.version}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
 
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg" style={{ background: statBg, border: `1px solid ${statBorder}` }}>
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke={getPingColor(ping)} strokeWidth="2.5">

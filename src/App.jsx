@@ -474,7 +474,7 @@ function AppContent() {
 
   return (
     <div className="w-screen h-screen flex flex-col overflow-hidden relative z-10" style={{ background: 'transparent' }}>
-      <TitleBar onCloseRequest={handleCloseRequest} user={displaySession?.user} onLogout={handleLogout} lang={lang} theme={theme} server={selectedSidebarServer} />
+      <TitleBar onCloseRequest={handleCloseRequest} user={displaySession?.user} onLogout={handleLogout} lang={lang} theme={theme} server={selectedSidebarServer} appMode={appMode} />
       {renderContent()}
       {showCloseModal && (
         <CloseModal onClose={() => setShowCloseModal(false)} />
