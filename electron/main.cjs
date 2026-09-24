@@ -1148,6 +1148,7 @@ async function startLocalServer(serverId) {
   } else {
     args.push('-jar', launch.useJar, 'nogui')
   }
+  if (!args.includes('nogui')) args.push('nogui')
 
   sendServerLog(serverId, `[Daemon] ${javaBin} ${args.join(' ')}`)
   emitBasicStatus(serverId, 'starting')
@@ -3688,12 +3689,15 @@ function startWingsApiServer() {
         return servers.map(s => {
           const res = s.resources || {}
           const env = s.config || {}
-          const startupCmd = s.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}'
+          const startupCmd = s.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}} nogui'
           const jarFile = env.SERVER_JARFILE || 'server.jar'
           const resolvedStartup = startupCmd.replace(/\{\{SERVER_JARFILE\}\}/g, jarFile)
             .replace(/\{\{SERVER_MEMORY\}\}/g, String(res.memory || 1024))
           const memFlag = `-Xms128M -Xmx${res.memory || 1024}M`
-          const finalStartup = resolvedStartup.replace(/-Xms\d+M -Xmx\d+M/, memFlag)
+          let finalStartup = resolvedStartup.replace(/-Xms\d+M -Xmx\d+M/, memFlag)
+          if (/\bjava\b/.test(finalStartup) && /-jar\b/.test(finalStartup) && !/\bnogui\b/.test(finalStartup)) {
+            finalStartup = `${finalStartup} nogui`
+          }
 
           return {
             settings: {

@@ -9,7 +9,7 @@ export default function StartupPage({ server, theme, lang }) {
   const labelColor = theme === 'light' ? '#555' : 'rgba(255,255,255,0.6)'
   const borderColor = theme === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
 
-  const [startup, setStartup] = useState(server?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}')
+  const [startup, setStartup] = useState(server?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}} nogui')
   const [dockerImage, setDockerImage] = useState(server?.dockerImage || 'ghcr.io/pelican-eggs/yolks:java_21')
   const [envVars, setEnvVars] = useState(server?.config || {})
   const [saved, setSaved] = useState(false)

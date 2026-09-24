@@ -70,12 +70,15 @@ function getServers() {
   return (db.servers || []).map(s => {
     const res = s.resources || {}
     const env = s.config || {}
-    const startupCmd = s.startup || 'java -Xms128M -jar {{SERVER_JARFILE}}'
+    const startupCmd = s.startup || 'java -Xms128M -jar {{SERVER_JARFILE}} nogui'
     const jarFile = env.SERVER_JARFILE || 'server.jar'
     let resolvedStartup = startupCmd.replace(/\{\{SERVER_JARFILE\}\}/g, jarFile)
     resolvedStartup = resolvedStartup.replace(/\{\{SERVER_MEMORY\}\}/g, String(res.memory || 1024))
     const memFlag = `-Xms128M -Xmx${res.memory || 1024}M`
-    const finalStartup = resolvedStartup.replace(/-Xms\d+M -Xmx\d+M/, memFlag)
+    let finalStartup = resolvedStartup.replace(/-Xms\d+M -Xmx\d+M/, memFlag)
+    if (/\bjava\b/.test(finalStartup) && /-jar\b/.test(finalStartup) && !/\bnogui\b/.test(finalStartup)) {
+      finalStartup = `${finalStartup} nogui`
+    }
     return {
       settings: {
         uuid: s.id,

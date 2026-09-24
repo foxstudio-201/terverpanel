@@ -244,7 +244,7 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
       build: selectedBuild?.buildName || null,
       jarUrl: selectedBuild?.jarUrl || selectedBuild?.zipUrl || null,
       dockerImage: selectedDockerImage,
-      startup: eggData?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}',
+      startup: eggData?.startup || 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}} nogui',
       stopCommand: eggData?.config?.stop || 'stop',
       donePattern: eggData?.config?.startup ? (typeof eggData.config.startup === 'string' ? (() => { try { return JSON.parse(eggData.config.startup).done || ')! For help, type' } catch { return ')! For help, type' } })() : ')! For help, type') : ')! For help, type',
       resources: {

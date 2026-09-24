@@ -14,15 +14,15 @@
         "pid_limit"
     ],
     "docker_images": {
-        "Java 25": "ghcr.io\/pelican-eggs\/yolks:java_25",
-        "Java 21": "ghcr.io\/pelican-eggs\/yolks:java_21",
-        "Java 17": "ghcr.io\/pelican-eggs\/yolks:java_17",
-        "Java 16": "ghcr.io\/pelican-eggs\/yolks:java_16",
-        "Java 11": "ghcr.io\/pelican-eggs\/yolks:java_11",
-        "Java 8": "ghcr.io\/pelican-eggs\/yolks:java_8"
+        "Java 25": "ghcr.io/pelican-eggs/yolks:java_25",
+        "Java 21": "ghcr.io/pelican-eggs/yolks:java_21",
+        "Java 17": "ghcr.io/pelican-eggs/yolks:java_17",
+        "Java 16": "ghcr.io/pelican-eggs/yolks:java_16",
+        "Java 11": "ghcr.io/pelican-eggs/yolks:java_11",
+        "Java 8": "ghcr.io/pelican-eggs/yolks:java_8"
     },
     "file_denylist": [],
-    "startup": "java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}",
+    "startup": "java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}} nogui",
     "config": {
         "files": "{\n    \"server.properties\": {\n        \"parser\": \"properties\",\n        \"find\": {\n            \"server-ip\": \"\",\n            \"server-port\": \"{{server.build.default.port}}\",\n            \"query.port\": \"{{server.build.default.port}}\"\n        }\n    }\n}",
         "startup": "{\n    \"done\": \")! For help, type \"\n}",
@@ -31,8 +31,8 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/ash\n# Vanilla MC Installation Script\n#\n# Server Files: \/mnt\/server\nmkdir -p \/mnt\/server\ncd \/mnt\/server\n\nLATEST_VERSION=`curl https:\/\/launchermeta.mojang.com\/mc\/game\/version_manifest.json | jq -r '.latest.release'`\nLATEST_SNAPSHOT_VERSION=`curl https:\/\/launchermeta.mojang.com\/mc\/game\/version_manifest.json | jq -r '.latest.snapshot'`\n\necho -e \"latest version is $LATEST_VERSION\"\necho -e \"latest snapshot is $LATEST_SNAPSHOT_VERSION\"\n\nif [ -z \"$VANILLA_VERSION\" ] || [ \"$VANILLA_VERSION\" == \"latest\" ]; then\n  MANIFEST_URL=$(curl -sSL https:\/\/launchermeta.mojang.com\/mc\/game\/version_manifest.json | jq --arg VERSION $LATEST_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nelif [ \"$VANILLA_VERSION\" == \"snapshot\" ]; then\n  MANIFEST_URL=$(curl -sSL https:\/\/launchermeta.mojang.com\/mc\/game\/version_manifest.json | jq --arg VERSION $LATEST_SNAPSHOT_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nelse\n  MANIFEST_URL=$(curl -sSL https:\/\/launchermeta.mojang.com\/mc\/game\/version_manifest.json | jq --arg VERSION $VANILLA_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nfi\n\nDOWNLOAD_URL=$(curl ${MANIFEST_URL} | jq .downloads.server | jq -r '. | .url')\n\necho -e \"running: curl -o ${SERVER_JARFILE} $DOWNLOAD_URL\"\ncurl -o ${SERVER_JARFILE} $DOWNLOAD_URL\n\necho -e \"Install Complete\"",
-            "container": "ghcr.io\/pelican-eggs\/installers:alpine",
+            "script": "#!/bin/ash\n# Vanilla MC Installation Script\n#\n# Server Files: /mnt/server\nmkdir -p /mnt/server\ncd /mnt/server\n\nLATEST_VERSION=`curl https://launchermeta.mojang.com/mc/game/version_manifest.json | jq -r '.latest.release'`\nLATEST_SNAPSHOT_VERSION=`curl https://launchermeta.mojang.com/mc/game/version_manifest.json | jq -r '.latest.snapshot'`\n\necho -e \"latest version is $LATEST_VERSION\"\necho -e \"latest snapshot is $LATEST_SNAPSHOT_VERSION\"\n\nif [ -z \"$VANILLA_VERSION\" ] || [ \"$VANILLA_VERSION\" == \"latest\" ]; then\n  MANIFEST_URL=$(curl -sSL https://launchermeta.mojang.com/mc/game/version_manifest.json | jq --arg VERSION $LATEST_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nelif [ \"$VANILLA_VERSION\" == \"snapshot\" ]; then\n  MANIFEST_URL=$(curl -sSL https://launchermeta.mojang.com/mc/game/version_manifest.json | jq --arg VERSION $LATEST_SNAPSHOT_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nelse\n  MANIFEST_URL=$(curl -sSL https://launchermeta.mojang.com/mc/game/version_manifest.json | jq --arg VERSION $VANILLA_VERSION -r '.versions | .[] | select(.id== $VERSION )|.url')\nfi\n\nDOWNLOAD_URL=$(curl ${MANIFEST_URL} | jq .downloads.server | jq -r '. | .url')\n\necho -e \"running: curl -o ${SERVER_JARFILE} $DOWNLOAD_URL\"\ncurl -o ${SERVER_JARFILE} $DOWNLOAD_URL\n\necho -e \"Install Complete\"",
+            "container": "ghcr.io/pelican-eggs/installers:alpine",
             "entrypoint": "ash"
         }
     },
@@ -44,7 +44,7 @@
             "default_value": "server.jar",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|regex:\/^([\\w\\d._-]+)(\\.jar)$\/",
+            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
             "field_type": "text"
         },
         {
