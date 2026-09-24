@@ -576,7 +576,7 @@ function GameModal({ game, theme, lang, onClose, onServerCreated }) {
               <Section title={t(lang, 'modal.resources')}>
                 <div className="space-y-3">
                   <SliderInput label="RAM" value={resources.memory} onChange={(v) => setResources({ ...resources, memory: v })} min={512} max={32768} step={256} unit="MB" />
-                  <SliderInput label="CPU" value={resources.cpu} onChange={(v) => setResources({ ...resources, cpu: v })} min={10} max={400} step={10} unit="%" />
+                  <SliderInput label="CPU" value={resources.cpuPercent ?? resources.cpu ?? 100} onChange={(v) => setResources({ ...resources, cpuPercent: v, cpu: v })} min={10} max={400} step={10} unit="%" />
                   <SliderInput label="Disk" value={resources.disk} onChange={(v) => setResources({ ...resources, disk: v })} min={1024} max={102400} step={1024} unit="MB" />
                 </div>
               </Section>
@@ -607,10 +607,20 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete,
   const [menuOpen, setMenuOpen] = useState(false)
 
   const bgImage = server.game === 'minecraft' ? './Minecraft_backgound.png' : './terraria_backgound.png'
-  const gameIcon = server.game === 'minecraft' ? './minecraft_icon.png' : './terraria_icon.png'
+  const gameIcon = server.game === 'terraria' ? './terraria_icon.png' : './minecraft_icon.png'
   const statusColor = server.status === 'running' ? '#22c55e' : server.status === 'installing' || server.status === 'starting' ? '#eab308' : server.status === 'error' ? '#ef4444' : '#6b7280'
   const serverIp = '127.0.0.1'
-  const serverPort = '25565'
+  const serverPort = String(server.port || 25565)
+
+  const usage = server.resources_usage || {}
+  const memLimitMb = Number(server.resources?.memory || 0)
+  const cpuLimit = Number(server.resources?.cpuPercent || 0)
+  const diskLimitMb = Number(server.resources?.disk || 0)
+  const memUsedMb = Math.round((Number(usage.memory_bytes) || 0) / 1048576)
+  const cpuUsed = Math.round((Number(usage.cpu_absolute) || 0) * 10) / 10
+  const diskUsedMb = Math.round((Number(usage.disk_bytes) || 0) / 1048576)
+  const diskLimitLabel = diskLimitMb >= 1024 ? Math.round((diskLimitMb / 1024) * 10) / 10 : diskLimitMb
+  const diskLimitUnit = diskLimitMb >= 1024 ? 'GB' : 'MB'
 
   return (
     <div
@@ -714,21 +724,21 @@ function ServerCard({ server, theme, lang, onStart, onStop, onRestart, onDelete,
             <Memory size={16} weight="duotone" style={{ color: '#a78bfa' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>RAM</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{server.resources?.memory || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>MB</span></p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{memUsedMb}/{memLimitMb}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>MB</span></p>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             <Cpu size={16} weight="duotone" style={{ color: '#3b82f6' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>CPU</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{server.resources?.cpuPercent || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>%</span></p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{cpuUsed}/{cpuLimit}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>%</span></p>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             <HardDrive size={16} weight="duotone" style={{ color: '#22c55e' }} />
             <div>
               <p className="text-[9px] uppercase font-semibold" style={{ color: labelColor }}>Disk</p>
-              <p className="text-[11px] font-bold" style={{ color: textColor }}>0/{(server.resources?.disk || 0) >= 1024 ? Math.round((server.resources.disk / 1024) * 10) / 10 : server.resources?.disk || 0}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>{(server.resources?.disk || 0) >= 1024 ? 'GB' : 'MB'}</span></p>
+              <p className="text-[11px] font-bold" style={{ color: textColor }}>{diskUsedMb}/{diskLimitLabel}<span className="text-[9px] font-normal ml-0.5" style={{ color: labelColor }}>{diskLimitUnit}</span></p>
             </div>
           </div>
         </div>
@@ -822,6 +832,33 @@ function HomePage({ theme, lang, onServerCreated, onSelectServer }) {
       }
     })
   }, [servers])
+
+  const serversRef = useRef([])
+  serversRef.current = servers
+
+  useEffect(() => {
+    if (!isElectron) return
+    const tick = async () => {
+      const list = serversRef.current.filter(s => s.id && s.status !== 'installing')
+      if (!list.length) return
+      const updates = await Promise.all(list.map(async (s) => {
+        try {
+          const res = await window.electronAPI.getServerStatus(s.id)
+          if (res?.ok) return { id: s.id, status: res.status, resources_usage: res.resources || {} }
+        } catch {}
+        return null
+      }))
+      const map = new Map(updates.filter(Boolean).map(u => [u.id, u]))
+      if (!map.size) return
+      setServers(prev => prev.map(s => {
+        const u = map.get(s.id)
+        return u ? { ...s, status: u.status, resources_usage: u.resources_usage } : s
+      }))
+    }
+    tick()
+    const iv = setInterval(tick, 3000)
+    return () => clearInterval(iv)
+  }, [isElectron])
 
   const bg = theme === 'light' ? '#f5f5f5' : '#0a0a0a'
   const textColor = theme === 'light' ? '#111' : '#fff'

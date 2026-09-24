@@ -1082,6 +1082,111 @@ function localServerState(serverId) {
   return 'running'
 }
 
+const _procCpuPrev = new Map() // serverId -> { t, total }
+const _dirSizeCache = new Map() // serverId -> { at, bytes }
+
+function serverMemLimitMb(server) {
+  const m = Number(server?.resources?.memory ?? server?.memory)
+  return Number.isFinite(m) && m > 0 ? m : 0
+}
+
+function dirSizeRecursive(dir) {
+  let total = 0
+  const walk = (d) => {
+    let entries
+    try { entries = fs.readdirSync(d, { withFileTypes: true }) } catch { return }
+    for (const ent of entries) {
+      const p = path.join(d, ent.name)
+      try {
+        if (ent.isDirectory()) walk(p)
+        else if (ent.isFile()) total += fs.statSync(p).size
+      } catch {}
+    }
+  }
+  walk(dir)
+  return total
+}
+
+function serverDirSizeCached(serverId) {
+  const now = Date.now()
+  const c = _dirSizeCache.get(serverId)
+  if (c && now - c.at < 10000) return c.bytes
+  let bytes = 0
+  try {
+    const dir = path.join(WINGS_DATA_DIR, serverId)
+    if (fs.existsSync(dir)) bytes = dirSizeRecursive(dir)
+  } catch {}
+  _dirSizeCache.set(serverId, { at: now, bytes })
+  return bytes
+}
+
+function basicProcessStats(serverId) {
+  const e = _localProcs.get(serverId)
+  if (!e || !e.proc || e.proc.killed || e.proc.exitCode !== null) return null
+  const pid = e.proc.pid
+  if (!pid) return null
+
+  let memoryBytes = 0
+  try {
+    const status = fs.readFileSync(`/proc/${pid}/status`, 'utf-8')
+    const m = status.match(/VmRSS:\s+(\d+)\s+kB/)
+    if (m) memoryBytes = Number(m[1]) * 1024
+  } catch {}
+
+  let cpuAbs = 0
+  let uptimeMs = null
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8')
+    const closeParen = stat.lastIndexOf(')')
+    const rest = closeParen >= 0 ? stat.slice(closeParen + 2).split(/\s+/) : []
+    const utime = Number(rest[11]) || 0
+    const stime = Number(rest[12]) || 0
+    const starttime = Number(rest[19]) || 0
+    const total = utime + stime
+    const now = Date.now()
+    const prev = _procCpuPrev.get(serverId)
+    if (prev && now > prev.t && total >= prev.total) {
+      const hz = 100
+      const elapsed = (now - prev.t) / 1000
+      cpuAbs = Math.max(0, ((total - prev.total) / hz / elapsed) * 100)
+    }
+    _procCpuPrev.set(serverId, { t: now, total })
+    if (starttime > 0) {
+      const clockTicks = 100
+      const boot = Number((fs.readFileSync('/proc/stat', 'utf-8').match(/^btime\s+(\d+)/m) || [])[1]) || 0
+      const procStartSec = boot + starttime / clockTicks
+      if (boot > 0) uptimeMs = Math.max(0, Date.now() - procStartSec * 1000)
+    }
+  } catch {
+    _procCpuPrev.delete(serverId)
+    return null
+  }
+
+  return { cpu: cpuAbs, memory: memoryBytes, uptime: uptimeMs }
+}
+
+function clearBasicStats(serverId) {
+  _procCpuPrev.delete(serverId)
+  _dirSizeCache.delete(serverId)
+}
+
+function basicServerUtil(serverId, running) {
+  const memLimitMb = serverMemLimitMb(getServerByUuid(serverId))
+  const diskBytes = serverDirSizeCached(serverId)
+  const stats = running ? basicProcessStats(serverId) : null
+  const memoryBytes = stats?.memory || 0
+  return {
+    cpu_absolute: stats?.cpu || 0,
+    memory_bytes: memoryBytes,
+    memory: memoryBytes,
+    memory_limit_bytes: memLimitMb > 0 ? memLimitMb * 1048576 : null,
+    disk_bytes: diskBytes,
+    network: { rx_bytes: 0, tx_bytes: 0, rx_packets: 0, tx_packets: 0 },
+    uptime: stats?.uptime ?? null,
+    state: running ? 'running' : 'offline',
+  }
+}
+
 function isInstallerJar(name) {
   return /installer/i.test(String(name || ''))
 }
@@ -1135,7 +1240,7 @@ async function startLocalServer(serverId) {
     return { ok: false, error: err.message }
   }
 
-  const memMb = Number(server.memory) > 0 ? Number(server.memory) : 1024
+  const memMb = serverMemLimitMb(server) > 0 ? serverMemLimitMb(server) : 1024
   const args = [
     `-Xms${Math.min(128, memMb)}M`,
     `-Xmx${memMb}M`,
@@ -1169,6 +1274,7 @@ async function startLocalServer(serverId) {
 
   const entry = { proc, stopping: false }
   _localProcs.set(serverId, entry)
+  _procCpuPrev.delete(serverId)
 
   let bufOut = ''
   let bufErr = ''
@@ -1192,6 +1298,7 @@ async function startLocalServer(serverId) {
 
   proc.on('error', (err) => {
     _localProcs.delete(serverId)
+    clearBasicStats(serverId)
     stopTpsPoller(serverId)
     clearServerTps(serverId)
     emitBasicStatus(serverId, 'offline')
@@ -1202,6 +1309,7 @@ async function startLocalServer(serverId) {
 
   proc.on('close', () => {
     if (_localProcs.get(serverId) === entry) _localProcs.delete(serverId)
+    clearBasicStats(serverId)
     stopTpsPoller(serverId)
     clearServerTps(serverId)
     emitBasicStatus(serverId, 'offline')
@@ -1526,6 +1634,7 @@ ipcMain.handle('server:removeConfig', async (e, id) => {
     try { await stopLocalServer(id, true) } catch {}
   }
   removeServerConfig(id)
+  clearBasicStats(id)
   const serverDir = path.join(WINGS_DATA_DIR, id)
   if (fs.existsSync(serverDir)) {
     try {
@@ -2477,21 +2586,22 @@ ipcMain.handle('server:status', async (e, serverId) => {
   if (isBasicMode()) {
     const state = localServerState(serverId)
     const isRunning = state === 'running'
+    const processLive = state !== 'offline'
     const nextStatus = isRunning ? 'running' : state === 'starting' ? 'starting' : state === 'stopping' ? 'stopping' : (server.status === 'installing' ? 'installing' : 'stopped')
     if (isRunning) startTpsPoller(serverId)
     else if (state === 'offline' && server.status === 'running') {
       stopTpsPoller(serverId)
       clearServerTps(serverId)
     }
-    updateServerConfig(serverId, { status: nextStatus })
+    const util = basicServerUtil(serverId, processLive)
+    updateServerConfig(serverId, { status: nextStatus, resources_usage: util })
     const live = _serverTps.get(serverId)
     const tps = live?.tps ?? (isRunning ? (server.lastTps ?? null) : null)
-    const memory = isRunning ? (Number(server.memory) > 0 ? Number(server.memory) * 1048576 : null) : null
     return {
       ok: true,
       status: nextStatus,
       state,
-      resources: isRunning ? { cpu_absolute: 0, memory_bytes: memory, memory: memory, disk_bytes: null, uptime: null } : {},
+      resources: util,
       tps,
     }
   }
