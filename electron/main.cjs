@@ -289,6 +289,30 @@ function parseTpsSamplesFromText(text) {
   m = t.match(/\b(?:current\s+)?TPS\s*[:=]\s*([\d]+(?:\.[\d]+)?)/i)
   if (m) { push(m[1]); return out }
 
+  // Vanilla/mod tick probe: Percentiles: P50: 0.1ms P95: 0.1ms P99: 1.1ms
+  const pct = t.match(/Percentiles:\s*([\s\S]{0,200})/i)
+  if (pct) {
+    const msHits = pct[1].match(/([\d]+(?:\.[\d]+)?)\s*ms/gi)
+    if (msHits && msHits.length) {
+      for (const hit of msHits) {
+        const mspt = parseFloat(String(hit).replace(/ms/i, ''))
+        if (mspt > 0 && mspt < 5000) push(1000 / mspt)
+      }
+      if (out.length) return out
+    }
+  }
+
+  // Vanilla/mod: Target tick rate: 20.0 per second
+  m = t.match(/Target tick rate:\s*([\d]+(?:\.[\d]+)?)/i)
+  if (m) { push(m[1]); return out }
+
+  // Fabric/vanilla: Average time per tick: 0.7ms (Target: 50.0ms)
+  m = t.match(/Average time per tick:\s*([\d]+(?:\.[\d]+)?)\s*ms/i)
+  if (m) {
+    const mspt = parseFloat(m[1])
+    if (mspt > 0 && mspt < 5000) { push(1000 / mspt); return out }
+  }
+
   m = t.match(/([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)\s*,\s*([\d]+\.[\d]+)/)
   if (m) {
     const a = parseFloat(m[1])
@@ -1011,6 +1035,11 @@ function isTpsProbeNoise(message) {
     || /\bTPS\s*[:=]\s*[\d.]+/i.test(s)
     || /\bMSPT\s*[:=]?\s*[\d.]+/i.test(s)
     || /\bavg\s+TPS\s*[:=]?\s*[\d.]+/i.test(s)
+    || /Target tick rate:\s*[\d.]+/i.test(s)
+    || /Percentiles:\s*P\d+/i.test(s)
+    || /The game is running normally/i.test(s)
+    || /Average time per tick:\s*[\d.]+\s*ms/i.test(s)
+    || /Target:\s*[\d.]+\s*ms/i.test(s)
 }
 
 function sendServerLog(serverId, message) {
@@ -5148,6 +5177,79 @@ ipcMain.handle('wings:server:writeFile', async (e, uuid, filePath, content) => {
     const dir = path.dirname(fullPath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(fullPath, content, 'utf-8')
+    return { ok: true }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+function ipcBuffer(data) {
+  if (Buffer.isBuffer(data)) return data
+  if (data instanceof Uint8Array) return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  if (data instanceof ArrayBuffer) return Buffer.from(data)
+  if (data && data.type === 'Buffer' && Array.isArray(data.data)) return Buffer.from(data.data)
+  if (typeof data === 'string') return Buffer.from(data, 'utf-8')
+  return Buffer.alloc(0)
+}
+
+ipcMain.handle('wings:server:uploadFile', async (e, uuid, filePath, data) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const rel = String(filePath || '').replace(/^\/+/, '')
+  if (!rel || rel.includes('..')) return { ok: false, error: 'Invalid path' }
+  const buf = ipcBuffer(data)
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const user = '00000000-0000-0000-0000-000000000001'
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/write?file=${encodeURIComponent(rel)}&user=${user}`
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/octet-stream',
+        'Accept': 'application/json',
+      },
+      body: buf,
+      timeout: 60000,
+    })
+    if (resp.ok) return { ok: true, path: rel, bytes: buf.length }
+    const errText = await resp.text().catch(() => '')
+    if (resp.status !== 404) return { ok: false, error: errText || `HTTP ${resp.status}` }
+  } catch {}
+  try {
+    const fullPath = path.join(WINGS_DATA_DIR, uuid, rel)
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+    fs.writeFileSync(fullPath, buf)
+    return { ok: true, path: rel, bytes: buf.length }
+  } catch (err) { return { ok: false, error: err.message } }
+})
+
+ipcMain.handle('wings:server:moveFile', async (e, uuid, fromPath, toPath) => {
+  if (!getTrustedWindow(e)) return { error: 'Unauthorized' }
+  const from = String(fromPath || '').replace(/^\/+/, '')
+  const to = String(toPath || '').replace(/^\/+/, '')
+  if (!from || !to || from.includes('..') || to.includes('..')) return { ok: false, error: 'Invalid path' }
+  try {
+    const tokenData = getWingsLocalToken()
+    const token = tokenData?.token || ''
+    const url = `http://127.0.0.1:8080/api/servers/${uuid}/files/rename`
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ from, to }),
+      timeout: 15000,
+    })
+    if (resp.ok) return { ok: true }
+    const errText = await resp.text().catch(() => '')
+    if (resp.status !== 404 && resp.status !== 405) return { ok: false, error: errText || `HTTP ${resp.status}` }
+  } catch {}
+  try {
+    const src = path.join(WINGS_DATA_DIR, uuid, from)
+    const dest = path.join(WINGS_DATA_DIR, uuid, to)
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    fs.renameSync(src, dest)
     return { ok: true }
   } catch (err) { return { ok: false, error: err.message } }
 })

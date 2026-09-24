@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   File, Folder, ArrowLeft, ArrowUp, Trash, Plus, FilePlus, FolderPlus,
   FloppyDisk, Warning, CaretRight, ListBullets, DotsThreeVertical, Download, PencilSimple,
+  UploadSimple,
 } from '@phosphor-icons/react'
 
 const isElectron = typeof window !== 'undefined' && window.electronAPI
@@ -53,6 +54,187 @@ function baseName(p) {
   return parts[parts.length - 1] || '/'
 }
 
+const INTERNAL_DND = 'application/x-terver-file-manager'
+
+function dataTransferHasFiles(dataTransfer) {
+  if (!dataTransfer) return false
+  return (
+    Array.from(dataTransfer.types || []).includes('Files') ||
+    Array.from(dataTransfer.items || []).some((item) => item.kind === 'file')
+  )
+}
+
+function withUploadPath(file, relPath) {
+  try {
+    Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: relPath })
+  } catch {}
+  return file
+}
+
+function traverseDirectory(entry, out, pathPrefix = '') {
+  return new Promise((resolve) => {
+    const reader = entry.createReader()
+    const readBatch = () => {
+      reader.readEntries(
+        async (entries) => {
+          if (!entries.length) { resolve(); return }
+          await Promise.all(
+            entries.map((child) => {
+              if (child.isFile) {
+                return new Promise((resFile) => {
+                  child.file((file) => {
+                    out.push({ file: withUploadPath(file, `${pathPrefix}/${file.name}`), relPath: `${pathPrefix}/${file.name}` })
+                    resFile()
+                  }, () => resFile())
+                })
+              }
+              return traverseDirectory(child, out, `${pathPrefix}/${child.name}`)
+            }),
+          )
+          readBatch()
+        },
+        () => resolve(),
+      )
+    }
+    readBatch()
+  })
+}
+
+async function getDroppedFiles(dataTransfer) {
+  const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === 'file')
+  const out = []
+  for (const item of items) {
+    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null
+    const file = item.getAsFile()
+    if (entry && entry.isDirectory) {
+      await traverseDirectory(entry, out, entry.name)
+    } else if (file) {
+      const rel = file.webkitRelativePath || file.name
+      out.push({ file, relPath: rel })
+    }
+  }
+  if (out.length > 0) return out
+  return Array.from(dataTransfer.files || []).map((file) => ({
+    file,
+    relPath: file.webkitRelativePath || file.name,
+  }))
+}
+
+function useFileDragAndDrop({ onDrop, enabled = true }) {
+  const [isDragging, setIsDragging] = useState(false)
+  const dragCounterRef = useRef(0)
+  const dragResetTimerRef = useRef(null)
+  const onDropRef = useRef(onDrop)
+  onDropRef.current = onDrop
+
+  const resetDragState = useCallback(() => {
+    if (dragResetTimerRef.current != null) {
+      window.clearTimeout(dragResetTimerRef.current)
+      dragResetTimerRef.current = null
+    }
+    dragCounterRef.current = 0
+    setIsDragging(false)
+  }, [])
+
+  useEffect(() => {
+    if (!enabled) { resetDragState(); return undefined }
+
+    const scheduleDragReset = () => {
+      if (dragResetTimerRef.current != null) window.clearTimeout(dragResetTimerRef.current)
+      dragResetTimerRef.current = window.setTimeout(resetDragState, 750)
+    }
+
+    const handleDragEnter = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      dragCounterRef.current++
+      if (dataTransferHasFiles(e.dataTransfer)) {
+        setIsDragging(true)
+        scheduleDragReset()
+      }
+    }
+
+    const handleDragLeave = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      dragCounterRef.current = Math.max(0, dragCounterRef.current - 1)
+      if (dragCounterRef.current === 0) resetDragState()
+    }
+
+    const handleDragOver = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (dataTransferHasFiles(e.dataTransfer)) scheduleDragReset()
+    }
+
+    const handleDrop = async (e) => {
+      if (!e.dataTransfer) return
+      const hasFiles = dataTransferHasFiles(e.dataTransfer)
+      if (!hasFiles) return
+      e.preventDefault()
+      e.stopPropagation()
+      resetDragState()
+      try {
+        const dropped = await getDroppedFiles(e.dataTransfer)
+        if (dropped.length > 0) await onDropRef.current(dropped, null)
+      } catch {}
+    }
+
+    const handleVisibility = () => { if (document.hidden) resetDragState() }
+
+    document.addEventListener('dragenter', handleDragEnter)
+    document.addEventListener('dragleave', handleDragLeave)
+    document.addEventListener('dragover', handleDragOver)
+    document.addEventListener('drop', handleDrop)
+    document.addEventListener('drop', resetDragState, true)
+    document.addEventListener('dragend', resetDragState, true)
+    document.addEventListener('visibilitychange', handleVisibility)
+    window.addEventListener('blur', resetDragState)
+    return () => {
+      document.removeEventListener('dragenter', handleDragEnter)
+      document.removeEventListener('dragleave', handleDragLeave)
+      document.removeEventListener('dragover', handleDragOver)
+      document.removeEventListener('drop', handleDrop)
+      document.removeEventListener('drop', resetDragState, true)
+      document.removeEventListener('dragend', resetDragState, true)
+      document.removeEventListener('visibilitychange', handleVisibility)
+      window.removeEventListener('blur', resetDragState)
+      if (dragResetTimerRef.current != null) window.clearTimeout(dragResetTimerRef.current)
+      dragResetTimerRef.current = null
+      dragCounterRef.current = 0
+    }
+  }, [enabled, resetDragState])
+
+  return { isDragging: enabled && isDragging }
+}
+
+function UploadDropOverlay({ visible, title, subtitle }) {
+  if (!visible) return null
+  return (
+    <div
+      className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.5)' }}
+    >
+      <div
+        className="rounded-lg p-8 shadow-2xl"
+        style={{
+          background: '#161616',
+          border: `2px dashed ${BLUE}`,
+          boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div className="flex flex-col items-center gap-4">
+          <span style={{ color: BLUE }}>
+            <UploadSimple size={56} weight="fill" className="animate-bounce" />
+          </span>
+          <p className="text-xl font-semibold text-white">{title}</p>
+          <p className="text-sm" style={{ color: 'rgba(255,255,255,0.55)' }}>{subtitle}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function FileManagerPage({ server, theme, lang }) {
   const isLight = theme === 'light'
   const textColor = isLight ? '#111' : '#fff'
@@ -78,6 +260,9 @@ export default function FileManagerPage({ server, theme, lang }) {
   const [actionMsg, setActionMsg] = useState('')
   const [showCreate, setShowCreate] = useState(null) // 'file' | 'folder'
   const [createName, setCreateName] = useState('')
+  const [uploading, setUploading] = useState(0)
+  const [dropTarget, setDropTarget] = useState(null) // folder name under cursor
+  const draggingRef = useRef(null) // internal drag: { name, isDir }
   const taRef = useRef(null)
   const gutterRef = useRef(null)
 
@@ -114,6 +299,93 @@ export default function FileManagerPage({ server, theme, lang }) {
   const flash = (msg) => {
     setActionMsg(msg)
     setTimeout(() => setActionMsg(''), 2500)
+  }
+
+  const uploadDropped = useCallback(async (dropped, targetDir) => {
+    if (!isElectron || !server?.id) return
+    const destDir = targetDir != null ? targetDir : currentPath
+    if (!dropped?.length) return
+    setUploading((n) => n + dropped.length)
+    let ok = 0
+    let fail = 0
+    for (const item of dropped) {
+      const rel = item.relPath || item.file.webkitRelativePath || item.file.name
+      const dest = joinPath(destDir, rel)
+      try {
+        const buf = await item.file.arrayBuffer()
+        const res = await window.electronAPI.wingsUploadFile(server.id, dest, new Uint8Array(buf))
+        if (res?.ok) ok += 1
+        else fail += 1
+      } catch { fail += 1 }
+    }
+    setUploading((n) => Math.max(0, n - dropped.length))
+    loadFiles(currentPath)
+    if (fail === 0) flash(lang === 'vi' ? `Đã tải lên ${ok} tệp` : `Uploaded ${ok} file${ok === 1 ? '' : 's'}`)
+    else if (ok === 0) flash(lang === 'vi' ? 'Tải lên thất bại' : 'Upload failed')
+    else flash(lang === 'vi' ? `Lên ${ok}, lỗi ${fail}` : `Uploaded ${ok}, failed ${fail}`)
+  }, [server?.id, currentPath, lang])
+
+  const { isDragging: dropOverlay } = useFileDragAndDrop({
+    onDrop: uploadDropped,
+    enabled: !editingFile && !!server?.id && !loading,
+  })
+
+  const handleFileDragStart = (e, f) => {
+    if (dropOverlay) { e.preventDefault(); return }
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData(INTERNAL_DND, f.name)
+    e.dataTransfer.setData('text/plain', f.name)
+    draggingRef.current = { name: f.name, isDir: !!f.is_dir }
+  }
+
+  const handleFolderDragOver = (e, f) => {
+    if (!f.is_dir) return
+    const internal = draggingRef.current || e.dataTransfer.types.includes(INTERNAL_DND)
+    const external = dataTransferHasFiles(e.dataTransfer)
+    if (!internal && !external) return
+    if (internal && draggingRef.current?.name === f.name) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
+    if (dropTarget !== f.name) setDropTarget(f.name)
+  }
+
+  const handleFolderDragLeave = (e, f) => {
+    e.stopPropagation()
+    if (dropTarget === f.name) setDropTarget(null)
+  }
+
+  const handleFolderDrop = async (e, f) => {
+    if (!f.is_dir) return
+    e.preventDefault()
+    e.stopPropagation()
+    const destDir = joinPath(currentPath, f.name)
+    setDropTarget(null)
+
+    const internal = e.dataTransfer.getData(INTERNAL_DND) || draggingRef.current?.name
+    if (internal && internal !== f.name) {
+      const from = joinPath(currentPath, internal)
+      const to = joinPath(destDir, baseName(internal))
+      try {
+        const res = await window.electronAPI.wingsMoveFile(server.id, from, to)
+        if (res?.ok) {
+          loadFiles(currentPath)
+          flash(lang === 'vi' ? 'Đã di chuyển' : 'Moved')
+        } else {
+          flash(res?.error || (lang === 'vi' ? 'Di chuyển thất bại' : 'Move failed'))
+        }
+      } catch (err) {
+        flash(err.message || 'Move failed')
+      }
+      draggingRef.current = null
+      return
+    }
+
+    if (dataTransferHasFiles(e.dataTransfer)) {
+      const dropped = await getDroppedFiles(e.dataTransfer)
+      if (dropped.length) await uploadDropped(dropped, destDir)
+    }
+    draggingRef.current = null
   }
 
   const handleClick = (f) => {
@@ -415,7 +687,12 @@ export default function FileManagerPage({ server, theme, lang }) {
   }
 
   return (
-    <div className="h-full flex flex-col overflow-hidden" style={{ background: bodyBg }}>
+    <div className="h-full flex flex-col overflow-hidden relative" style={{ background: bodyBg }}>
+      <UploadDropOverlay
+        visible={dropOverlay && !editingFile}
+        title={lang === 'vi' ? 'Thả tệp vào đây' : 'Drop files here'}
+        subtitle={lang === 'vi' ? `Tải lên ${currentPath}` : `Upload to ${currentPath}`}
+      />
       {/* Toolbar */}
       <div
         className="shrink-0 flex items-center gap-2 px-3 py-2"
@@ -450,6 +727,11 @@ export default function FileManagerPage({ server, theme, lang }) {
         {actionMsg && (
           <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: BLUE_LIGHT, color: BLUE }}>
             {actionMsg}
+          </span>
+        )}
+        {uploading > 0 && (
+          <span className="text-[10px] px-2 py-0.5 rounded" style={{ background: 'rgba(34,197,94,0.15)', color: GREEN }}>
+            {lang === 'vi' ? `Đang tải lên ${uploading}…` : `Uploading ${uploading}…`}
           </span>
         )}
         <span className="text-[10px]" style={{ color: labelColor }}>
@@ -568,6 +850,7 @@ export default function FileManagerPage({ server, theme, lang }) {
         ) : (
           files.map((f) => {
             const isSelected = selected === f.name
+            const isDropHot = f.is_dir && dropTarget === f.name
             return (
               <div
                 key={f.name}
@@ -576,11 +859,21 @@ export default function FileManagerPage({ server, theme, lang }) {
                   gridTemplateColumns: '1fr 90px 140px 36px',
                   minHeight: 41,
                   borderBottom: `1px solid ${borderColor}`,
-                  background: isSelected ? BLUE_LIGHT : 'transparent',
+                  background: isDropHot
+                    ? (isLight ? 'rgba(34,197,94,0.18)' : 'rgba(34,197,94,0.18)')
+                    : (isSelected ? BLUE_LIGHT : 'transparent'),
+                  outline: isDropHot ? `1px solid ${GREEN}` : 'none',
+                  outlineOffset: -1,
                 }}
+                draggable={!loading && !dropOverlay}
+                onDragStart={(e) => handleFileDragStart(e, f)}
+                onDragEnd={() => { draggingRef.current = null; setDropTarget(null) }}
+                onDragOver={(e) => handleFolderDragOver(e, f)}
+                onDragLeave={(e) => handleFolderDragLeave(e, f)}
+                onDrop={(e) => handleFolderDrop(e, f)}
                 onClick={() => handleClick(f)}
-                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = surfaceHover }}
-                onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent' }}
+                onMouseEnter={(e) => { if (!isSelected && !isDropHot) e.currentTarget.style.background = surfaceHover }}
+                onMouseLeave={(e) => { if (!isSelected && !isDropHot) e.currentTarget.style.background = 'transparent' }}
               >
                 <div className="flex items-center gap-2.5 min-w-0 pr-2">
                   {f.is_dir

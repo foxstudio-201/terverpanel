@@ -87,6 +87,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   wingsDeleteFile: (uuid, path) => ipcRenderer.invoke('wings:server:deleteFile', uuid, path),
   wingsCreateFile: (uuid, dir, name) => ipcRenderer.invoke('wings:server:createFile', uuid, dir, name),
   wingsCreateFolder: (uuid, dir, name) => ipcRenderer.invoke('wings:server:createFolder', uuid, dir, name),
+  wingsUploadFile: (uuid, path, data) => ipcRenderer.invoke('wings:server:uploadFile', uuid, path, data),
+  wingsMoveFile: (uuid, from, to) => ipcRenderer.invoke('wings:server:moveFile', uuid, from, to),
   wingsSyncConfig: (uuid, config) => ipcRenderer.invoke('wings:server:sync', uuid, config),
   wingsReinstall: (uuid) => ipcRenderer.invoke('wings:server:reinstall', uuid),
   wingsDeleteServer: (uuid) => ipcRenderer.invoke('wings:server:delete', uuid),

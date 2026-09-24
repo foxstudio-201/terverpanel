@@ -161,6 +161,11 @@ function isTpsProbeNoise(text) {
     || /\bTPS\s*[:=]\s*[\d.]+/i.test(s)
     || /\bMSPT\s*[:=]?\s*[\d.]+/i.test(s)
     || /\bavg\s+TPS\s*[:=]?\s*[\d.]+/i.test(s)
+    || /Target tick rate:\s*[\d.]+/i.test(s)
+    || /Percentiles:\s*P\d+/i.test(s)
+    || /The game is running normally/i.test(s)
+    || /Average time per tick:\s*[\d.]+\s*ms/i.test(s)
+    || /Target:\s*[\d.]+\s*ms\s*\)/i.test(s)
 }
 
   const writeLine = useCallback((text, { prelude = false, dedupeKey = null } = {}) => {
